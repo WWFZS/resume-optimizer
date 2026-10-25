@@ -6,7 +6,6 @@
 <title>AI智简历 - 简历编辑器</title>
 <link rel="stylesheet" href="/static/resume-render.css?v=20261005e">
 <link rel="stylesheet" href="/static/editor-v3.css?v=20261005r">
-<link rel="stylesheet" href="/static/editor-richtext.css?v=20261012a">
 </head>
 <body>
 
@@ -58,14 +57,12 @@
   <aside class="v3-left">
     <div class="v3-left-head">内容<div class="v3-left-tip">所有修改实时同步到右侧简历</div></div>
     <div class="v3-left-body" id="leftBody"></div>
-    <div class="v3-left-body v3-nav-body" id="moduleList" hidden></div>
   </aside>
 
   <!-- 中：A4 所见即所得 -->
   <section class="v3-center" id="centerWrap">
     <div class="v3-pagebox" id="pageBox">
       <div class="rp-paper rr-host" id="paper"></div>
-      <div class="rp-paper rt-host" id="previewPaper" hidden></div>
     </div>
     <div class="v3-pagehint" id="pageHint"></div>
   </section>
@@ -141,9 +138,6 @@
     <p class="v3-modal-tip">更换版式与配色<b>不会丢失任何内容</b>；之后也可在右侧设计面板继续微调。</p>
     <div class="v3-tpl-sec-title">内置版式</div>
     <div class="v3-tpl-grid" id="tplGrid"></div>
-    <div class="v3-tpl-sec-title" id="realTplTitle" hidden>真实模板<span class="v3-tpl-sec-sub">首次打开需解析可编辑区域，约半分钟</span></div>
-    <div class="v3-tpl-grid" id="realTplGrid"></div>
-    <div class="v3-tpl-loading" id="realTplLoading" hidden>正在加载模板库…</div>
   </div>
 </div>
 
@@ -196,8 +190,6 @@
 <div class="v3-toast" id="toast" hidden></div>
 
 <script src="/static/resume-render.js?v=20261005d"></script>
-<script src="/static/resume-bind.js?v=20261012c"></script>
 <script src="/static/editor-v3.js?v=20261012c"></script>
-<script src="/static/editor-richtext.js?v=20261012c"></script>
 </body>
 </html>

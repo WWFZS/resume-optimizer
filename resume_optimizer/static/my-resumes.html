@@ -93,6 +93,8 @@
   .rc-meta { font-size: 11.5px; color: var(--ink-3); margin-top: 4px; display: flex; align-items: center; gap: 8px; }
   .rc-time { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .rc-tag { display: inline-block; padding: 1px 7px; border-radius: var(--r-sm); font-size: 10.5px; font-weight: 600; background: var(--paper-deep); color: var(--ink-2); max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 旧版真实模板草稿的降级提示：中性小标记，不是警告色 */
+  .rc-legacy { display: inline-block; padding: 1px 7px; border-radius: var(--r-sm); font-size: 10.5px; font-weight: 600; background: var(--paper-deep); color: var(--ink-3); border: 1px dashed var(--line, #ddd8d0); white-space: nowrap; cursor: help; }
 
   /* 悬停操作层 */
   .rc-overlay {
@@ -469,6 +471,8 @@ async function renderLiveThumbs() {
       if (!resp.ok) continue;
       const payload = await resp.json();
       const data = payload.data;
+      // 旧版真实模板草稿（richtext_mode=true）已降级为经典模式，卡片先打上「旧版模板」标记
+      if (data && data.richtext_mode) markLegacyCard(d.id);
       if (!data || data.v !== 3 || !data.resume) continue; // 旧版草稿沿用模板预览图
       const wrap = document.querySelector('[data-thumb="' + d.id + '"]');
       if (!wrap || !window.ResumeRender) continue;
@@ -481,6 +485,23 @@ async function renderLiveThumbs() {
       page.style.transform = 'scale(' + z + ')';
     } catch (e) { /* 单份失败不影响其余 */ }
   }
+}
+
+// 给绑定了旧版真实模板、含 richtext_edits 的存量草稿补一个中性小标记
+function markLegacyCard(id) {
+  // 记在本地列表项上，删除后重渲染时标记不会丢（只改内存，不改草稿数据）
+  const row = draftList.find(x => x.id === id);
+  if (row) row.richtext_mode = true;
+  const card = document.querySelector('.resume-card[data-id="' + id + '"]');
+  if (!card) return;
+  const meta = card.querySelector('.rc-meta');
+  if (!meta || meta.querySelector('.rc-legacy')) return;
+  const timeEl = meta.querySelector('.rc-time');
+  const mark = document.createElement('span');
+  mark.className = 'rc-legacy';
+  mark.title = '旧版模板草稿 · 打开后使用内置版式（内容已保留）';
+  mark.textContent = '旧版模板';
+  meta.insertBefore(mark, timeEl);
 }
 
 // ── 渲染简历卡片 ──
@@ -525,6 +546,7 @@ function renderCards() {
         <div class="rc-name">${escapeHtml(d.title)}</div>
         <div class="rc-meta">
           <span class="rc-tag">${escapeHtml(tplName)}</span>
+          ${d.richtext_mode ? '<span class="rc-legacy" title="旧版模板草稿 · 打开后使用内置版式（内容已保留）">旧版模板</span>' : ''}
           <span class="rc-time">${timeStr}</span>
         </div>
       </div>

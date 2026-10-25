@@ -69,8 +69,8 @@ def t_merge():
 
 # ── 3) JS syntax ──
 def t_js():
-    files = ["static/editor-v3.js", "static/resume-render.js",
-             "static/resume-bind.js", "static/editor-richtext.js"]
+    # 真实模板已从编辑器移除（仅首页展示+下载），编辑器只加载这两个脚本
+    files = ["static/editor-v3.js", "static/resume-render.js"]
     for f in files:
         r = subprocess.run(["node", "--check", str(BASE / f)], capture_output=True, text=True)
         assert r.returncode == 0, "%s: %s" % (f, r.stderr[:200])
@@ -85,22 +85,19 @@ def t_js():
     ed = (BASE / "static/editor.html").read_text(encoding="utf-8")
     assert "editor.js" not in ed and "editor.css" not in ed
     assert "editor-v3.js" in ed and "resume-render.js" in ed
-    # 真实模板「文档直接编辑」模式已接线：模块 + 样式 + 桥接挂载点齐备
-    assert "editor-richtext.js" in ed, "editor.html 未加载 editor-richtext.js"
-    assert "editor-richtext.css" in ed, "editor.html 未加载 editor-richtext.css"
-    assert 'id="previewPaper"' in ed, "editor.html 缺少富文本纸面 #previewPaper"
-    assert 'id="moduleList"' in ed, "editor.html 缺少文档导航 #moduleList"
+    # 真实模板已从编辑器移除：确认编辑器不再引用富文本链路资源，
+    # 且真实模板仍由首页展示/下载（后端接口保留）
+    for gone in ("editor-richtext.js", "editor-richtext.css", "resume-bind.js",
+                 'id="previewPaper"', 'id="moduleList"'):
+        assert gone not in ed, "editor.html 仍引用已移除的富文本资源: " + gone
     v3 = (BASE / "static/editor-v3.js").read_text(encoding="utf-8")
-    assert "__edBridge" in v3, "editor-v3.js 未暴露 __edBridge（richtext 依赖）"
-    assert "richtext_mode" in v3, "editor-v3.js 未在草稿中持久化 richtext_mode"
-    rtjs = (BASE / "static/editor-richtext.js").read_text(encoding="utf-8")
-    assert "__edBridge" in rtjs and "RichtextMode" in rtjs
-    # B 阶段：槽位映射模块已接线（seed + writeback 两个钩子都在）
-    assert "resume-bind.js" in ed, "editor.html 未加载 resume-bind.js"
-    rb = (BASE / "static/resume-bind.js")
-    assert rb.exists(), "static/resume-bind.js 缺失"
-    assert "seedFromResume()" in rtjs, "richtext 未接 seed 钩子"
-    assert "applyBoxEdit" in rtjs, "richtext 未接 writeback 钩子"
+    for gone in ("__edBridge", "richtext_mode", "__edBridge", "RichtextMode"):
+        assert gone not in v3, "editor-v3.js 仍含已移除的富文本逻辑: " + gone
+    # 富文本源文件保留在磁盘（便于回滚），只是编辑器不再加载
+    for kept in ("static/editor-richtext.js", "static/resume-bind.js"):
+        assert (BASE / kept).exists(), "回滚所需的源文件不应被删除: " + kept
+    # 8 套内置模板仍在
+    assert v3.count("key: '") >= 8, "内置模板 PRESETS 数量不足"
     admin = (BASE / "static/admin.html").read_text(encoding="utf-8")
     for token in ["vipUserCard", "mappingCard", "aliasCard", "cfgModal", "user-vip"]:
         assert token not in admin, "admin.html still has " + token
@@ -238,7 +235,6 @@ for name, fn in [
     ("export round-trip docx->pdf->long png", t_export_roundtrip),
     ("added-box injection into real template", t_added_injection),
     ("resume-render mixTheme accent", t_mix_theme),
-    ("resume-bind seed/writeback round-trip", t_resume_bind_roundtrip),
 ]:
     check(name, fn)
 
