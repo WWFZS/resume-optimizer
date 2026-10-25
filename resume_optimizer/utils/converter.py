@@ -70,37 +70,52 @@ def pdf_to_docx(pdf_path: Union[str, Path], docx_path: Union[str, Path]) -> Path
 
 
 def docx_to_pdf(docx_path: Union[str, Path], pdf_path: Union[str, Path]) -> Path:
-    """通过 Word COM 将 docx 转为 PDF。"""
+    """通过 Word COM 将 docx 转为 PDF（独立 Word 实例，不影响用户已打开的文档）。
+
+    安全说明：旧实现会在转换前后强杀 WINWORD.EXE 进程，会连带
+    杀掉用户所有未保存的 Word 文档。现改为 DispatchEx 起独立实例，
+    转换完只关闭本次打开的文档并退出该实例，绝不触碰用户的 Word 进程。
+    """
     pdf_path = Path(pdf_path)
-    # 先清理可能残留/损坏的 Word 进程，避免 COM 状态退化导致转换失败
-    try:
-        import subprocess
-        subprocess.run(["taskkill", "/F", "/IM", "WINWORD.EXE"],
-                       capture_output=True, shell=False)
-    except Exception:  # noqa: BLE001
-        pass
-    import time
-    time.sleep(0.6)
     # FastAPI 工作线程中必须先初始化 COM，否则 Word 自动化会报
     # "尚未调用 CoInitialize" 错误（线程池线程不自动初始化）
     import pythoncom
     pythoncom.CoInitialize()
     last_err = None
-    for attempt in range(3):
-        try:
-            docx2pdf_convert(str(docx_path), str(pdf_path), keep_active=False)
-            return pdf_path
-        except Exception as exc:  # noqa: BLE001
-            last_err = exc
-            time.sleep(2 * (attempt + 1))
+    try:
+        for attempt in range(3):
+            word = None
+            doc = None
             try:
-                import subprocess
-                subprocess.run(["taskkill", "/F", "/IM", "WINWORD.EXE"],
-                               capture_output=True, shell=False)
-            except Exception:  # noqa: BLE001
-                pass
-            time.sleep(1.0)
-    pythoncom.CoUninitialize()
+                import win32com.client
+                # DispatchEx：新建独立的 Word 实例，与用户已打开的 Word 进程隔离
+                word = win32com.client.DispatchEx("Word.Application")
+                word.Visible = False
+                word.DisplayAlerts = False
+                doc = word.Documents.Open(str(Path(docx_path).resolve()), ReadOnly=True)
+                # wdFormatPDF = 17
+                doc.SaveAs2(str(pdf_path.resolve()), FileFormat=17)
+                return pdf_path
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+            finally:
+                # 成功/失败都要收尾：只关本次打开的文档并退出本次的实例
+                try:
+                    if doc is not None:
+                        doc.Close(SaveChanges=0)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    if word is not None:
+                        word.Quit()
+                except Exception:  # noqa: BLE001
+                    pass
+            # 失败后实例可能已损坏，下一轮重建一个新实例再试
+            if attempt < 2:
+                import time
+                time.sleep(2 * (attempt + 1))
+    finally:
+        pythoncom.CoUninitialize()
     raise last_err
 
 
@@ -142,7 +157,7 @@ def _get_word_app():
 
 def docx_to_pdf_fast(docx_path: Union[str, Path], pdf_path: Union[str, Path]) -> Path:
     """快速版：复用全局 Word 进程，比 docx_to_pdf 快 3-5s。
-    失败时自动降级到 docx_to_pdf（taskkill 重启策略）。
+    失败时自动降级到 docx_to_pdf（独立实例重建策略）。
     线程安全：用全局锁串行化 Word 调用。"""
     import pythoncom
     import time

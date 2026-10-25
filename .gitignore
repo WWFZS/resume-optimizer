@@ -42,3 +42,9 @@ auto_test/_*.json
 # 用户上传的模板源文件（本地留存，不入库）
 resume_optimizer/utils/templates/*.docx
 !resume_optimizer/utils/templates/builtin*.docx
+
+# 逆向分析产物（287 文件 6.8MB，含第三方 Vue 打包产物，本地留存）
+_rea_tukuppt/
+
+# 含绝对路径的本机资料（保留本地，不入库）
+系统功能总结.txt

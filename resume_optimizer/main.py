@@ -528,8 +528,61 @@ def admin_login(payload: _AdminLoginIn):
 
 
 @app.post("/api/admin/register")
-def admin_register(payload: _AdminRegisterIn):
-    """注册管理员账号（最多 MAX_ADMINS 个），成功后直接登录。"""
+async def admin_register(request: Request,
+                         x_admin_password: Optional[str] = Header(None)):
+    """注册管理员账号（最多 MAX_ADMINS 个），成功后直接登录。
+
+    安全：仅「一个管理员都没有」的引导场景（全新部署）允许自助注册，
+    否则必须提供正确的管理员口令（请求头 X-Admin-Password 优先，
+    其次表单字段 admin_password），口令缺失或错误一律 401。
+    ADMIN_PASSWORD 未配置时同样拒绝注册，不退化成免密。
+    """
+    # 解析请求体：兼容 JSON（前端 admin_login.html）与表单两种提交方式
+    ctype = (request.headers.get("content-type") or "").lower()
+    data = {}
+    if "application/json" in ctype:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = None
+        if isinstance(body, dict):
+            data = body
+    else:
+        try:
+            form = await request.form()
+            data = {k: v for k, v in form.items() if isinstance(v, str)}
+        except Exception:  # noqa: BLE001
+            data = {}
+
+    # 未配置管理员口令（.env 缺 ADMIN_PASSWORD）时一律拒绝注册，
+    # 绝不能退化成「免密注册」
+    if not ADMIN_PASSWORD:
+        raise HTTPException(status_code=401,
+                            detail="未配置管理员口令，无法注册管理员账号")
+
+    # 主体校验：缺字段/类型不对时返回 422（与改动前 FastAPI 默认行为一致）
+    try:
+        payload = _AdminRegisterIn.model_validate(data)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail="请填写账号与密码")
+
+    # 该路由原本是同步函数（FastAPI 放到线程池执行），改为 async 后
+    # 把阻塞的 DB 调用放回线程池，避免占用事件循环
+    from starlette.concurrency import run_in_threadpool
+
+    # 非引导场景：必须校验管理员口令
+    # （引导场景 = 库里一个管理员都没有，允许自助注册，否则系统永远起不来管理员）
+    if await run_in_threadpool(db.count_admins) > 0:
+        # 口令来源优先级：请求头 X-Admin-Password → 表单字段 admin_password
+        supplied = x_admin_password or data.get("admin_password") or ""
+        if not supplied:
+            raise HTTPException(status_code=401,
+                                detail="需要管理员口令才能注册管理员账号")
+        # 先编码再比，避免非 ASCII 口令触发 compare_digest 的 TypeError(500)
+        if not secrets.compare_digest(supplied.encode("utf-8"),
+                                     ADMIN_PASSWORD.encode("utf-8")):
+            raise HTTPException(status_code=401, detail="管理员口令不正确")
+
     account = (payload.account or "").strip().lower()
     password = payload.password or ""
     nickname = (payload.nickname or "").strip()[:30]
@@ -537,19 +590,20 @@ def admin_register(payload: _AdminRegisterIn):
         raise HTTPException(status_code=400, detail="请输入正确的手机号或邮箱")
     if len(password) < 6:
         raise HTTPException(status_code=400, detail="密码至少 6 位")
-    if db.count_admins() >= MAX_ADMINS:
+    if await run_in_threadpool(db.count_admins) >= MAX_ADMINS:
         raise HTTPException(status_code=400, detail=f"管理员账号已满（最多 {MAX_ADMINS} 个）")
-    if db.get_user_by_account(account) is not None:
+    if await run_in_threadpool(db.get_user_by_account, account) is not None:
         raise HTTPException(status_code=400, detail="该账号已注册")
-    admin_id = db.create_admin(account, user_auth.hash_password(password), nickname)
+    admin_id = await run_in_threadpool(
+        db.create_admin, account, user_auth.hash_password(password), nickname)
     if not admin_id:
         raise HTTPException(status_code=400, detail="该账号已注册")
-    admin = db.get_admin_by_account(account)
-    db.touch_login(admin_id)
+    admin = await run_in_threadpool(db.get_admin_by_account, account)
+    await run_in_threadpool(db.touch_login, admin_id)
     token = user_auth.new_token()
     admin_tokens[token] = {"exp": time.time() + ADMIN_TOKEN_TTL}
     applog.log("admin_register", user_id=admin_id, account=account,
-               total=db.count_admins())
+               total=await run_in_threadpool(db.count_admins))
     return {
         "token": token,
         "user": {

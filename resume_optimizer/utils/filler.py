@@ -460,9 +460,14 @@ def _apply_replacements(para: Paragraph, content_map: Dict[str, str],
         return
 
     # ── 混合文本占位符 ──
-    new_text = text
-    for label in set(PLACEHOLDER_RE.findall(text)):
-        key = label.strip()
+    # 用正则回填：兼容模板写成 {{ 电话 }}（带空格）等各种形态，
+    # 旧实现用 replace("{{"+label+"}}") 只能匹配无空格的原文形态，
+    # 带空格的占位符永远替换不掉，导出 Word 会残留 {{ }}。
+    def _repl(m):
+        key = m.group(1).strip()
+        if key not in content_map:
+            # 未命中的标签保持原样（不替换成空），避免误删模板内容
+            return m.group(0)
         repl = _normalize_spaces(content_map.get(key, ""))
         # 联系方式按上下文拆分：电话：{{联系方式}} 只填电话，邮箱：{{联系方式}} 只填邮箱
         if key == "联系方式":
@@ -470,7 +475,9 @@ def _apply_replacements(para: Paragraph, content_map: Dict[str, str],
                 repl = content_map["电话"]
             elif re.search(r"邮箱|Email|E-mail|Mail|邮件", text, re.IGNORECASE) and content_map.get("邮箱"):
                 repl = content_map["邮箱"]
-        new_text = new_text.replace("{{" + label + "}}", repl)
+        return repl
+
+    new_text = PLACEHOLDER_RE.sub(_repl, text)
     # 文本框内"标签：值"单行放不下时自适应（缩字号/去标签）
     new_text = _fit_textbox_inline(para, new_text)
     _set_para_text_multiline(para, new_text)

@@ -6,7 +6,6 @@
 - t{id}_bg.png  : 仅设计、无内容的空白预览，用于编辑器背景
                   （保留 Word 原型：图标/配色/版式，且避免可编辑文字与示例文字重叠成双层）
 """
-import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -55,15 +54,6 @@ LABEL_MAP = {
     "教育背景": SAMPLE_RESUME["education"],
     "专业技能": SAMPLE_RESUME["skills"],
 }
-
-
-def _kill_word():
-    try:
-        subprocess.run(["taskkill", "/F", "/IM", "WINWORD.EXE"],
-                       capture_output=True, shell=False)
-    except Exception:
-        pass
-    time.sleep(0.8)
 
 
 def _convert_and_save(docx_path, pdf_path, png_path, name, tid, tag):
@@ -125,8 +115,8 @@ def _gen_for(tpl, preview_dir, tmp):
                 _convert_and_save(docx, tmp / f"t{tid}_b.pdf", out_blank, tpl["name"], tid, "_bg")
     except Exception as exc:  # noqa: BLE001
         print(f"失败: t{tid} {tpl['name']}: {str(exc)[:160]}")
-    finally:
-        _kill_word()
+    # 模板之间无需再清理 Word 进程：converter.docx_to_pdf 走 DispatchEx
+    # 独立实例，转完即 Quit，不会碰用户自己打开的 Word。
 
 
 def main():

@@ -154,6 +154,16 @@
               </button>
             </div>
           </div>
+          <div class="field">
+            <div class="field-label"><label for="regAdminPwd">管理员口令</label><span class="hint">用于确认管理员身份</span></div>
+            <div class="pw-box">
+              <input class="input" id="regAdminPwd" type="password" placeholder="管理员口令（已有管理员时必填）" autocomplete="off">
+              <button type="button" class="pw-eye" data-target="regAdminPwd" title="显示/隐藏口令" aria-label="显示或隐藏口令">
+                <svg class="i-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+                <svg class="i-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></svg>
+              </button>
+            </div>
+          </div>
           <button class="btn-login btn-primary" id="registerBtn" type="submit">注册</button>
         </form>
         <div class="switch-line">已有管理员账号？<a id="toLogin">立即登录</a></div>
@@ -196,10 +206,14 @@ const PHONE_RE = /^1\d{10}$/;
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.\w+$/;
 function validAccount(s) { return PHONE_RE.test(s) || EMAIL_RE.test(s); }
 
-async function api(path, body) {
+async function api(path, body, extraHeaders) {
+  const headers = { "Content-Type": "application/json" };
+  if (extraHeaders) {
+    Object.keys(extraHeaders).forEach(function(k) { headers[k] = extraHeaders[k]; });
+  }
   const resp = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: headers,
     body: JSON.stringify(body)
   });
   const data = await resp.json().catch(function() { return {}; });
@@ -257,6 +271,7 @@ $("registerForm").addEventListener("submit", async function(e) {
   const nick = $("regNick").value.trim();
   const pwd = $("regPwd").value;
   const pwd2 = $("regPwd2").value;
+  const adminPwd = $("regAdminPwd").value.trim();
   let ok = true;
   ok = markInput($("regAccount"), account.length > 0) && ok;
   ok = markInput($("regPwd"), pwd.length > 0) && ok;
@@ -282,7 +297,13 @@ $("registerForm").addEventListener("submit", async function(e) {
   btn.disabled = true;
   btn.textContent = "注册中…";
   try {
-    const data = await api("/api/admin/register", { account: account, nickname: nick, password: pwd });
+    // 后端 /api/admin/register 的口令来源优先级：请求头 X-Admin-Password → 字段 admin_password。
+    // 两处都带上，任一处被代理/网关丢弃都不影响注册。
+    const data = await api(
+      "/api/admin/register",
+      { account: account, nickname: nick, password: pwd, admin_password: adminPwd },
+      { "X-Admin-Password": adminPwd }
+    );
     sessionStorage.setItem(TOKEN_KEY, data.token);
     showToast("注册成功，正在进入…");
     setTimeout(function() { location.href = "/admin"; }, 350);

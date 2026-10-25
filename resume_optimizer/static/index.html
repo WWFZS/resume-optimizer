@@ -645,12 +645,14 @@ function renderTemplates() {
   const pageItems = filtered.slice(start, start + TPL_PER_PAGE);
   grid.innerHTML = pageItems.map(function(t, i) {
     const thumb = t.preview_url
-      ? '<img class="tpl-preview" src="' + t.preview_url + '" alt="' + t.name + '" loading="lazy">'
+      ? '<img class="tpl-preview" src="' + escapeHtml(t.preview_url) + '" alt="' + escapeHtml(t.name || "") + '" loading="lazy">'
       : '<div class="tpl-preview" style="display:flex;align-items:center;justify-content:center;color:#B6BFD0;font-size:13px">暂无预览</div>';
-    return '<div class="tpl-card' + (t.id === selectedTemplateId ? " selected" : "") + '" data-id="' + t.id + '">'
+    // 主色走颜色白名单：非法值不输出 style 属性，避免属性逃逸与 CSS 注入
+    const primaryColor = safeColor(t.config && t.config.primary_color);
+    return '<div class="tpl-card' + (t.id === selectedTemplateId ? " selected" : "") + '" data-id="' + escapeHtml(t.id) + '">'
       + thumb
       + '<div class="tpl-body">'
-      + '<div class="tpl-name">' + (t.config && t.config.primary_color ? '<span class="tpl-color" style="background:' + t.config.primary_color + '"></span>' : "") + t.name + '</div>'
+      + '<div class="tpl-name">' + (primaryColor ? '<span class="tpl-color" style="background:' + primaryColor + '"></span>' : "") + escapeHtml(t.name || "") + '</div>'
       + '<div class="tpl-desc">' + escapeHtml(t.description || "") + '</div>'
       + '</div></div>';
   }).join("");
@@ -722,7 +724,8 @@ function renderTplFilter() {
   });
   const el = $("tplFilter");
   el.innerHTML = cats.map(function(c) {
-    return '<button class="' + (c === tplFilter ? "active" : "") + '" data-cat="' + c + '">' + c + '</button>';
+    // 分类名同样来自后端 config（管理员可控），属性与文本都要转义
+    return '<button class="' + (c === tplFilter ? "active" : "") + '" data-cat="' + escapeHtml(c) + '">' + escapeHtml(c) + '</button>';
   }).join("");
   el.querySelectorAll("button").forEach(function(b) {
     b.addEventListener("click", function() {
@@ -746,7 +749,22 @@ $("tplModal").addEventListener("click", function(e) {
 });
 
 function escapeHtml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // 与 editor-v3.js 的 esc() 对齐：引号也转义，才能安全用于双引号属性上下文
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+// ── 颜色白名单：模板主色来自后端 config（管理员可控），只放行合法颜色写法 ──
+// 非法值直接丢弃该 style 属性，避免属性逃逸与 CSS 注入。
+function safeColor(v) {
+  const s = String(v == null ? "" : v).trim();
+  if (!s) return "";
+  if (/^#[0-9a-fA-F]{3}$/.test(s)) return s;
+  if (/^#[0-9a-fA-F]{6}$/.test(s)) return s;
+  if (/^#[0-9a-fA-F]{8}$/.test(s)) return s;
+  if (/^rgba?\(\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*(,\s*(0|1|0?\.[0-9]+)\s*)?\)$/.test(s)) return s;
+  return "";
 }
 
 // ── 滚动引导 ──

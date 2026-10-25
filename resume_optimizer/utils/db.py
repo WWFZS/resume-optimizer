@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 
 import pymysql
 from dotenv import load_dotenv
+from pymysql.constants import CLIENT
 from pymysql.cursors import DictCursor
 
 load_dotenv()
@@ -112,7 +113,12 @@ CREATE TABLE IF NOT EXISTS template_downloads (
 
 @contextmanager
 def get_conn():
-    """获取数据库连接的上下文管理器（自动提交/回滚/关闭）。"""
+    """获取数据库连接的上下文管理器（自动提交/回滚/关闭）。
+
+    启用 CLIENT.FOUND_ROWS：UPDATE 返回「匹配行数」而不是「实际变更行数」，
+    值本来就相同的 UPDATE 也算命中，避免草稿保存被误判为「记录不存在」
+    而重复插入（幂等重复提交误报 404）。
+    """
     conn = pymysql.connect(
         host=DB_HOST,
         port=DB_PORT,
@@ -122,6 +128,7 @@ def get_conn():
         charset="utf8mb4",
         cursorclass=DictCursor,
         autocommit=False,
+        client_flag=CLIENT.FOUND_ROWS,
     )
     try:
         yield conn
@@ -629,23 +636,37 @@ def set_template_editable(template_id: int, editable: int) -> bool:
 
 
 def set_templates_editable(template_ids, editable: int) -> int:
-    """批量设置编辑器可用性，返回受影响的行数。
+    """批量设置编辑器可用性，返回实际发生变更的行数。
 
     批量场景是常态：模板可用性探测一次会判定几十个模板，
     逐个发请求既慢又容易中途失败。
+
+    注意：连接启用了 CLIENT.FOUND_ROWS，UPDATE 的 rowcount 是「命中行数」，
+    值本就相同的行也会被计入；故先取原值比较，只统计真正变更的行，
+    保持返回值与原先「实际变更条数」一致。
     """
     ids = [int(i) for i in template_ids]
     if not ids:
         return 0
     placeholders = ", ".join(["%s"] * len(ids))
+    want = 1 if editable else 0
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
+                "SELECT id, editable FROM templates "
+                "WHERE id IN (%s) AND is_active = 1" % placeholders,
+                tuple(ids),
+            )
+            # editable 可能为 NULL（NULL != 0/1，UPDATE 会真正改值，故计为变更）
+            changed = sum(1 for r in cur.fetchall()
+                          if r["editable"] is None
+                          or int(r["editable"]) != want)
+            cur.execute(
                 "UPDATE templates SET editable = %s WHERE id IN (%s) AND is_active = 1"
                 % ("%s", placeholders),
-                tuple([1 if editable else 0] + ids),
+                tuple([want] + ids),
             )
-            return cur.rowcount
+            return changed
 
 
 def update_template_config(template_id: int, config: str) -> bool:
@@ -758,7 +779,12 @@ def renumber_templates() -> Dict[int, int]:
 
 def remap_draft_template_ids(mapping: Dict[int, int]) -> int:
     """模板 ID 重排后，同步更新 resume_drafts.template_id 引用，避免草稿指向错误模板。
-    返回被更新的草稿行数。"""
+    返回被更新的草稿行数。
+
+    连接启用了 CLIENT.FOUND_ROWS（rowcount = 命中行数），但这里每条 UPDATE
+    都把 template_id 由 old 改成 new（old != new 已在循环开头跳过），
+    命中的行必然真的发生变更，故两种语义计数一致。
+    """
     if not mapping:
         return 0
     affected = 0
@@ -783,7 +809,7 @@ def renumber_display_ids() -> dict:
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id FROM templates "
+                "SELECT id, display_id FROM templates "
                 "WHERE is_active = 1 "
                 "ORDER BY created_at ASC, id ASC",
             )
@@ -793,7 +819,11 @@ def renumber_display_ids() -> dict:
                     "UPDATE templates SET display_id = %s WHERE id = %s",
                     (idx, r["id"]),
                 )
-                stats["free"] += cur.rowcount
+                # 连接启用了 CLIENT.FOUND_ROWS，rowcount 是「命中行数」，
+                # 值本就相同的行也会被计入；这里按前后取值比较，
+                # 只统计真正发生变更的行，保持原有语义。
+                if r["display_id"] != idx:
+                    stats["free"] += 1
         conn.commit()
     return stats
 

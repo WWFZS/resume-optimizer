@@ -244,20 +244,32 @@ def _convert_to_pdf_safe(docx_path, pdf_path, timeout=25):
             "app = win32com.client.DispatchEx('Word.Application')\n"
             "app.Visible = False\n"
             "app.DisplayAlerts = False\n"
-            "doc = app.Documents.Open(os.path.abspath(sys.argv[1]), ReadOnly=True)\n"
-            "doc.SaveAs2(os.path.abspath(sys.argv[2]), FileFormat=17)\n"
-            "doc.Close(False)\n"
-            "app.Quit()\n"
+            "doc = None\n"
+            "try:\n"
+            "    doc = app.Documents.Open(os.path.abspath(sys.argv[1]), ReadOnly=True)\n"
+            "    doc.SaveAs2(os.path.abspath(sys.argv[2]), FileFormat=17)\n"
+            "finally:\n"
+            "    if doc is not None:\n"
+            "        try:\n"
+            "            doc.Close(False)\n"
+            "        except Exception:\n"
+            "            pass\n"
+            "    try:\n"
+            "        app.Quit()\n"
+            "    except Exception:\n"
+            "        pass\n"
         )
         subprocess.run([_sys.executable, "-c", script, str(work), str(pdf_path)],
                        capture_output=True, timeout=timeout)
         return Path(pdf_path).exists()
     except Exception:  # noqa: BLE001 超时/失败
-        try:
-            subprocess.run(["taskkill", "/F", "/IM", "WINWORD.EXE"],
-                           capture_output=True, shell=False, timeout=8)
-        except Exception:  # noqa: BLE001
-            pass
+        # 安全：这里绝不能按进程名强杀 WINWORD.EXE —— 那会连带杀掉用户
+        # 所有未保存的 Word 文档（数据丢失级）。上面的脚本已用 try/finally
+        # 包住 Open/SaveAs2，成功与异常路径都会 Quit 本次 DispatchEx 起的
+        # 独立 Word 实例。唯一残留场景：子进程超时被 kill 时脚本来不及执行
+        # finally，可能留下一个不可见的 Word 实例；该实例与用户手动打开的
+        # Word 进程相互独立（DispatchEx），残留只占一份内存，代价远小于误
+        # 杀用户文档，故接受此残留，不做任何全局杀进程。
         return False
     finally:
         try:
