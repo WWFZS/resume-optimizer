@@ -100,9 +100,11 @@
       rtTemplateId = tid;
       rtActive = true;
       b.State.editorMode = 'richtext';
+      seedFromResume();           // B：S.resume 是唯一真相，先按槽位映射预填
       seedFromClassic();          // 旧「真实模板热区」草稿迁移为富文本编辑
       render();
       renderNavPanel();
+      reportCoverage(b);          // B：内容放不下的板块给出诚实提示
       b.persistLocal();
       if (!opts.silent) toast('已启用文档直接编辑：点进内容即可修改', 'success');
     } catch (e) {
@@ -112,22 +114,52 @@
         showBuildingPaper(msg);   // 首次解析 10~40 秒：倒计时自动重试
         return;
       }
-      /* 422（复杂版式）或其他失败 → 回退经典热区模式 */
+      /* 422（复杂版式）或其他失败 → 交给桥接层回退（v3 无热区模式，切回内置版式并提示） */
       rtActive = false;
       b.loadRealStructure(tid);
-      if (msg.indexOf('422') >= 0 || msg.indexOf('复杂版式') >= 0) {
-        toast('该模板为复杂版式，已切换为热区编辑模式', '');
-      }
     }
   }
 
   /* 用户在模板弹窗点了缩略图：立即给出纸面反馈，再异步加载结构 */
   function switched(t) {
+    /* 换模板前先把聚焦盒子的未决编辑落盘（rtEdits + S.resume），防 350ms 防抖丢尾字 */
+    if (_activeBox) { try { serializeBox(_activeBox, false); } catch (e) {} }
     reset();
     const b = bridge();
     if (b) b.persistLocal();
     showSwitchingPaper(t && t.name);
     load(t.id);
+  }
+
+  /* B：resume → 盒子预填。已有编辑（云端恢复/用户改过）优先于 seed。 */
+  function seedFromResume() {
+    const b = bridge();
+    const RB = window.ResumeBind;
+    if (!b || !RB || !b.State || !b.State.resume || !rtStructure) return;
+    let seed = {};
+    try { seed = RB.seedEdits(rtStructure, b.State.resume) || {}; } catch (e) { return; }
+    Object.keys(seed).forEach(k => {
+      if (!rtEdits[k]) rtEdits[k] = seed[k];
+    });
+  }
+
+  /* B：内容放不下当前模板时的诚实提示（数据不删，只是这份版式没地方展示） */
+  function reportCoverage(b) {
+    const RB = window.ResumeBind;
+    if (!RB || !b || !b.State || !b.State.resume || !rtStructure) return;
+    let cov = {};
+    try { cov = RB.coverage(rtStructure, b.State.resume) || {}; } catch (e) { return; }
+    const dropped = [];
+    Object.keys(cov).forEach(role => {
+      const c = cov[role];
+      if (c.records > c.boxes && c.boxes >= 0) {
+        const label = ROLE_LABELS[role] || role;
+        dropped.push(label + '（' + c.records + ' 条仅显示 ' + c.boxes + ' 条）');
+      }
+    });
+    if (dropped.length) {
+      setTimeout(() => toast('当前模板放不下：' + dropped.join('、') + '，可换更宽松版式或删减条目', ''), 600);
+    }
   }
 
   /* 旧真实模板草稿（realBoxTexts 纯文本）→ 富文本编辑，保住老用户内容 */
@@ -370,6 +402,12 @@
     const bid = box.dataset.bid;
     if (bid == null) return;
     rtEdits[bid] = serializeBoxDom(box);
+    /* B：盒子编辑实时回写 S.resume（唯一真相），经典模式与换模板共享同一份 */
+    const b0 = bridge();
+    const RB = window.ResumeBind;
+    if (b0 && RB && b0.State && b0.State.resume && rtStructure) {
+      try { RB.applyBoxEdit(rtStructure, b0.State.resume, bid, String(box.innerText || '')); } catch (e) { /* 解析失败不动数据 */ }
+    }
     if (persist) {
       const b = bridge();
       if (b) { b.setDirtyTip('已修改', 'dirty'); b.persistLocal(); }
@@ -548,7 +586,7 @@
   function rtStyleWithCss() { try { document.execCommand('styleWithCSS', false, true); } catch (e) {} }
 
   function buildToolbar() {
-    if (_toolbarBuilt || !$('body')) return;
+    if (_toolbarBuilt || !document.body) return;   /* 注意：$() 是 getElementById，'body' 不是 id */
     const bar = document.createElement('div');
     bar.id = 'rtToolbar';
     bar.className = 'rt-toolbar';

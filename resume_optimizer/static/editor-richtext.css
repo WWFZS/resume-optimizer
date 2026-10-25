@@ -1,0 +1,212 @@
+/* ════════════════════════════════════════════════════════════════════
+ * editor-richtext.css — WPS 风格「文档直接编辑」模式样式
+ * ──────────────────────────────────────────────────────────────────
+ * 服务于 editor-richtext.js（挂载于 editor.html 的 #previewPaper）。
+ * 从退役前的 editor.css 抽出的 .rt-* / .rtp-* 规则集，独立成文件，
+ * 不与 editor-v3.css / resume-render.css 冲突：
+ *   · 纸张容器 .rp-paper.rt-host 复用 v3 已定义的 .rp-paper 基座；
+ *   · toast 复用 #toast，但 richtext 会把它切成 .ed-toast —— 故本文件
+ *     自带 .ed-toast，避免与 .v3-toast 抢样式时出现无样式闪烁。
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* ── 纸张容器：真实模板模式只做透明画布，页面自身带尺寸与阴影 ── */
+.rp-paper.rt-host {
+  width: auto; max-width: none; min-height: 0;
+  padding: 0; background: transparent; border-radius: 0;
+  box-shadow: none; overflow: visible;
+}
+
+/* ── 多页纵向堆叠 ── */
+.rtp-pages { display: flex; flex-direction: column; align-items: center; gap: 18px; }
+
+.rtp-page {
+  position: relative; margin: 0 auto;
+  background: #fff; border-radius: 2px;
+  box-shadow: 0 2px 18px rgba(28, 25, 23, .10);
+  overflow: hidden;
+}
+
+/* 无字装饰底图（Word 渲染成品，去掉文字层） */
+.rtp-bg { position: absolute; inset: 0 0 auto 0; display: block; width: 100%; height: auto; pointer-events: none; user-select: none; }
+
+.rtp-layer { position: absolute; inset: 0; z-index: 2; }
+
+/* ── 可编辑盒子（contenteditable 所见即所得） ── */
+.rt-box {
+  position: absolute; z-index: 3;
+  outline: none; cursor: text;
+  border: 1px dashed transparent;
+  border-radius: 2px;
+  overflow: visible;
+  white-space: pre-wrap;
+  word-break: break-word;
+  transition: border-color .12s ease, background-color .12s ease;
+}
+
+.rt-box:hover { border-color: rgba(52, 84, 155, .35); background: rgba(52, 84, 155, .04); }
+
+.rt-box.rt-active {
+  border-color: #34549B;
+  background: rgba(52, 84, 155, .03);
+  box-shadow: 0 0 0 2px rgba(52, 84, 155, .12);
+}
+
+/* 空盒子：给出「点击输入…」占位提示 */
+.rt-box:empty::before {
+  content: attr(data-ph);
+  color: #B9C2CE; font-weight: 400;
+  pointer-events: none;
+}
+
+.rt-box.rt-flash { animation: rtFlash 1.1s ease; }
+
+/* ── 照片盒子 ── */
+.rt-box-photo {
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  background-size: cover; background-position: center; background-repeat: no-repeat;
+}
+
+.rt-box-photo:hover { border-color: #34549B; background-color: rgba(52, 84, 155, .06); }
+
+.rt-photo-plus { color: #B9C2CE; font-size: 22px; font-weight: 700; pointer-events: none; }
+
+.rt-box-photo.rt-photo-filled .rt-photo-plus { display: none; }
+
+.rt-box-photo.rt-photo-filled { border-style: solid; }
+
+/* ── 加载 / 首次解析骨架 ── */
+.rt-loading-wrap {
+  min-height: 620px; height: 100%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; padding: 40px; text-align: center;
+  background: #fff; border-radius: 2px; box-shadow: 0 2px 18px rgba(28, 25, 23, .10);
+}
+
+.rt-spinner {
+  width: 42px; height: 42px; border-radius: 50%;
+  border: 3px solid #E3E9F4; border-top-color: #34549B;
+  animation: rtSpin .9s linear infinite;
+}
+
+.rt-loading-title { font-size: 16px; font-weight: 700; color: #3A4552; }
+
+.rt-loading-sub { font-size: 13px; color: #8A93A3; line-height: 1.8; max-width: 400px; }
+
+.rt-loading-sub b { color: #34549B; }
+
+.rt-loading-err { font-size: 12px; color: #C0564F; }
+
+/* ── 内容溢出一页的诚实提示 ── */
+.rt-overflow-chip {
+  position: absolute; right: 10px; bottom: 10px; z-index: 5;
+  padding: 5px 12px; border-radius: 999px;
+  background: #FFF6E8; border: 1px solid #EAD2A8; color: #9A6B1F;
+  font-size: 12px; pointer-events: none;
+}
+
+/* ── WPS 风格浮动工具栏（buildToolbar() 自建 #rtToolbar，appendChild 到 body） ── */
+.rt-toolbar {
+  position: absolute; z-index: 900;
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 5px 7px; border-radius: 9px;
+  background: #1F2530; color: #E8ECF4;
+  box-shadow: 0 8px 26px rgba(15, 20, 30, .28), 0 0 0 1px rgba(255, 255, 255, .06) inset;
+  animation: rtBarIn .14s ease;
+}
+
+.rt-toolbar[hidden] { display: none; }
+
+.rt-toolbar button {
+  min-width: 27px; height: 27px; padding: 0 6px;
+  border: none; border-radius: 6px; cursor: pointer;
+  background: transparent; color: #E8ECF4;
+  font-size: 13px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+
+.rt-toolbar button:hover { background: rgba(255, 255, 255, .14); }
+
+.rt-toolbar button.on { background: #34549B; color: #fff; }
+
+.rt-toolbar .rt-tb-sep { width: 1px; height: 17px; margin: 0 4px; background: rgba(255, 255, 255, .18); }
+
+.rt-toolbar select {
+  height: 27px; max-width: 96px;
+  border: none; border-radius: 6px; cursor: pointer;
+  background: rgba(255, 255, 255, .10); color: #E8ECF4;
+  font-size: 12px; padding: 0 5px; outline: none;
+}
+
+.rt-toolbar select option { color: #1F2530; }
+
+.rt-toolbar .rt-tb-color {
+  position: relative; width: 27px; height: 27px; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; font-size: 13px; font-weight: 700;
+  background: transparent; overflow: hidden;
+}
+
+.rt-toolbar .rt-tb-color:hover { background: rgba(255, 255, 255, .14); }
+
+.rt-toolbar .rt-tb-color input {
+  position: absolute; inset: 0; opacity: 0; cursor: pointer;
+}
+
+/* ── 左侧面板：文档导航（renderNavPanel 填充 #moduleList） ── */
+.ed-nav-note {
+  padding: 12px 14px; margin-bottom: 10px;
+  border: 1px solid #CADCFF; border-radius: 10px;
+  background: #EEF4FF; color: #2A4B8D;
+}
+
+.ed-nav-note b { display: block; font-size: 13px; margin-bottom: 4px; }
+
+.ed-nav-note span { font-size: 12px; line-height: 1.7; color: #4A669F; display: block; }
+
+.ed-nav-card {
+  padding: 11px 14px; margin-bottom: 8px;
+  border: 1px solid #E3E7EF; border-radius: 10px;
+  background: #fff; cursor: pointer;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+
+.ed-nav-card:hover { border-color: #34549B; box-shadow: 0 2px 10px rgba(52, 84, 155, .10); }
+
+.ed-nav-head { display: flex; align-items: center; justify-content: space-between; }
+
+.ed-nav-head b { font-size: 13.5px; color: #333F4E; }
+
+.ed-nav-head .ok { font-size: 11px; color: #2E9E6B; }
+
+.ed-nav-head .todo { font-size: 11px; color: #A9B2BF; }
+
+.ed-nav-sub { margin-top: 3px; font-size: 12px; color: #8A93A3; }
+
+/* ── toast：richtext 会把 #toast 切成 .ed-toast，需自带样式避免无样式闪烁 ── */
+.ed-toast {
+  position: fixed; top: 72px; left: 50%; transform: translateX(-50%);
+  background: rgba(31, 41, 51, .9); color: #fff;
+  padding: 9px 18px; border-radius: 999px; font-size: 13px; z-index: 400;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .16); animation: toastIn .2s;
+}
+
+.ed-toast[hidden] { display: none; }
+
+.ed-toast.success { background: rgba(61, 122, 80, .95); }
+
+.ed-toast.error { background: rgba(179, 55, 46, .95); }
+
+/* ── 动画 ── */
+@keyframes rtFlash {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(52, 84, 155, 0); }
+  30% { box-shadow: 0 0 0 4px rgba(52, 84, 155, .35); }
+}
+
+@keyframes rtSpin { to { transform: rotate(360deg); } }
+
+@keyframes rtBarIn { from { opacity: 0; transform: translateY(-4px); } }
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}

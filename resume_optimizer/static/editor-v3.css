@@ -272,6 +272,22 @@ details.v3-more > summary { font-size: 12px; color: var(--v3-accent); cursor: po
 .v3-tpl-thumb > .rr-page { position: absolute; top: 0; left: 0; }
 .v3-tpl-name { padding: 8px 10px; font-size: 12px; color: var(--v3-ink-2); text-align: center; border-top: 1px solid var(--v3-line); }
 
+/* 更换模板弹窗：分区标题 + 真实模板卡片 */
+.v3-tpl-sec-title { font-size: 13px; font-weight: 700; color: var(--v3-ink-2); margin: 6px 0 10px; }
+.v3-tpl-sec-title[hidden] { display: none; }
+.v3-tpl-sec-title + .v3-tpl-grid { margin-bottom: 18px; }
+.v3-tpl-sec-sub { font-weight: 400; font-size: 11.5px; color: var(--v3-ink-3); margin-left: 8px; }
+.v3-tpl-loading { font-size: 12.5px; color: var(--v3-ink-3); padding: 8px 2px; }
+.v3-tpl-loading[hidden] { display: none; }
+.v3-tpl-thumb .v3-real-img { width: 100%; height: 100%; object-fit: cover; object-position: top center; display: block; background: #fff; }
+.v3-tpl-card.v3-real-card .v3-tpl-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.v3-tpl-badge {
+  position: absolute; left: 8px; top: 8px; z-index: 2;
+  font-size: 10px; padding: 2px 8px; border-radius: 999px;
+  background: rgba(31, 41, 51, .72); color: #fff;
+}
+.v3-tpl-badge.warn { background: rgba(154, 107, 31, .9); }
+
 .v3-loading {
   position: fixed; inset: 0; background: rgba(255,255,255,.66); z-index: 90;
   display: flex; align-items: center; justify-content: center;

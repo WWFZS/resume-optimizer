@@ -127,9 +127,23 @@
     title: '',
     resume: blankResume(),
     theme: Object.assign({}, DEFAULT_THEME),
+    /* 编辑模式：classic = 内置版式（resume-render 数据驱动）
+       richtext = 真实 Word 模板骨架 + 就地富文本编辑（editor-richtext.js） */
+    editorMode: 'classic',
+    templateId: null,
+    templateName: '',
     ui: { folded: {}, zoom: 1 },
     dirty: false,
-    saving: false
+    saving: false,
+    /* 云端保存并发控制：
+       saveSeq       请求序号（每次发起自增；用于判断响应是否对应最新一次请求）
+       inflightSeq   当前飞行中请求的序号（0 = 无请求在飞）
+       pendingSave   存在未落盘改动（markDirty 置位，发起请求时清位）
+       pendingManual 手动保存请求被排队时的标记（补保存时沿用） */
+    saveSeq: 0,
+    inflightSeq: 0,
+    pendingSave: false,
+    pendingManual: false
   };
   var LS_KEY = 'zjl_editor_v3_draft';
   var DRAFT_SAVE_TIMER = null, LOCAL_SAVE_TIMER = null, RENDER_TIMER = null;
@@ -144,7 +158,9 @@
   /* ───────── 工具 ───────── */
 
   function esc(s) {
-    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
   function hasText(v) {
     if (v == null) return false;
@@ -334,7 +350,38 @@
   }
   var renderCenterSoon = debounce(function () { renderCenter(); }, 120);
 
+  /* 富文本（真实模板）模式是否可用 */
+  function rt() { return window.RichtextMode || null; }
+  function richtextActive() {
+    return S.editorMode === 'richtext' && !!(rt() && rt().isActive && rt().isActive());
+  }
+
+  /* ═════════ 模式切换：classic（内置版式）⇄ richtext（真实 Word 模板）══════ */
+  function setEditorMode(mode) {
+    S.editorMode = mode;
+    var paper = $('paper'), rtp = $('previewPaper'), hint = $('pageHint');
+    var leftBody = $('leftBody'), navBody = $('moduleList'), right = document.querySelector('.v3-right');
+    var isRt = (mode === 'richtext');
+    if (paper) paper.hidden = isRt;
+    if (rtp) rtp.hidden = !isRt;
+    if (leftBody) leftBody.hidden = isRt;
+    if (navBody) navBody.hidden = !isRt;
+    /* 真实模板的版式由 Word 原件决定，右侧设计面板（族/色/字号）在此模式无意义 */
+    if (right) right.style.display = isRt ? 'none' : '';
+    if (hint) hint.hidden = isRt;
+    if (isRt) {
+      var box = $('pageBox');
+      if (box) { box.style.width = ''; box.style.height = ''; }
+      if (paper) paper.style.transform = '';
+    } else {
+      /* 富文本编辑已实时回写 S.resume，回到经典需同时刷新左栏表单与 A4 */
+      buildLeftPanel();
+      renderCenter();
+    }
+  }
+
   function layoutPaper() {
+    if (S.editorMode === 'richtext') return;   // 真实模板纸张不缩放，中栏滚动查看
     var center = $('centerWrap'), box = $('pageBox'), paper = $('paper');
     var z = Math.min(1, Math.max(0.4, (center.clientWidth - 44) / A4.w));
     S.ui.zoom = z;
@@ -345,6 +392,7 @@
   }
 
   function updatePageHint() {
+    if (S.editorMode === 'richtext') { var h0 = $('pageHint'); if (h0) h0.hidden = true; return; }
     var page = $('paper').querySelector('.rr-page');
     var hint = $('pageHint');
     if (!page) { hint.textContent = ''; return; }
@@ -1436,6 +1484,9 @@
 
   function markDirty() {
     S.dirty = true;
+    /* 有未落盘改动：任何已发出的保存请求都不含这次改动，
+       保存请求返回后据此判断是否需要补一次保存 */
+    S.pendingSave = true;
     setSavedTip('is-dirty', '编辑中…');
     updatePageSoon();
     clearTimeout(LOCAL_SAVE_TIMER);
@@ -1446,37 +1497,96 @@
 
   function saveLocal() {
     try {
-      localStorage.setItem(LS_KEY, JSON.stringify({
+      var payload = {
         draftId: S.draftId, title: S.title,
         resume: S.resume, theme: S.theme, ts: Date.now()
-      }));
+      };
+      /* 真实模板模式：只存编辑增量 + 模板 id（结构体启动时从缓存接口重取，省空间） */
+      var r = rt();
+      if (r && r.modeForSave && r.modeForSave()) {
+        payload.rtMode = true;
+        payload.rtTemplateId = S.templateId;
+        payload.rtEdits = r.editsForSave ? r.editsForSave() : {};
+      }
+      localStorage.setItem(LS_KEY, JSON.stringify(payload));
     } catch (e) { /* 存储满等异常忽略 */ }
   }
 
   function saveCloud(manual) {
-    if (!S.user || S.saving) { if (manual) toast('请先登录后再保存'); return; }
+    if (!S.user) { if (manual) toast('未登录，请先登录后再保存'); return; }
+    if (S.saving) {
+      /* 已有请求在飞：手动保存排队等它结束后补存；自动保存靠 pendingSave 标记触发补存 */
+      if (manual) { S.pendingManual = true; toast('正在保存中，请稍候'); }
+      return;
+    }
+    /* 没有待落盘改动就不发空请求，避免制造多余草稿 */
+    if (!manual && !S.dirty && !S.pendingSave) return;
     S.saving = true;
+    var seq = ++S.saveSeq;
+    S.inflightSeq = seq;
     var name = (S.resume.basic.name || '').trim();
     var title = name ? name + '的简历' : (S.title || '未命名简历');
+    var r = rt();
+    var rtOn = !!(r && r.modeForSave && r.modeForSave());
+    var data = { v: 3, resume: S.resume, theme: S.theme };
+    if (rtOn) {
+      data.richtext_mode = true;
+      data.richtext_edits = r.editsForSave ? r.editsForSave() : {};
+    }
+    /* 本次请求已快照当前全部改动；此后再编辑会重新置位 pendingSave */
+    S.pendingSave = false;
     apiPost('/api/draft/save', {
       draft_id: S.draftId,
-      template_id: null,
+      template_id: rtOn ? S.templateId : null,
       title: title,
-      data: { v: 3, resume: S.resume, theme: S.theme }
+      data: data
     }).then(function (resp) {
+      /* 只有当响应属于当前最新一次请求时才允许清 dirty / 更新提示 */
+      var isLatest = (seq === S.saveSeq) && (seq === S.inflightSeq);
+      var hasNewEdits = S.pendingSave;   /* 飞行期间又产生了新改动，本响应不含它们 */
+      var wantManual = manual || S.pendingManual;   /* 期间点过手动保存 → 结束后给回执 */
       S.saving = false;
-      S.dirty = false;
+      S.inflightSeq = 0;
       if (resp && resp.draft_id) S.draftId = resp.draft_id;
       saveLocal();
-      var t = new Date();
-      setSavedTip('is-ok', '已同步云端 ' + ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2));
-      if (manual) toast('已保存到云端');
+      if (isLatest && !hasNewEdits) {
+        S.dirty = false;
+        var t = new Date();
+        setSavedTip('is-ok', '已同步云端 ' + ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2));
+        if (wantManual) toast('已保存到云端');
+      }
+      /* 飞行期间有新改动 → 立即补一次保存（用最新 draft_id，不新建重复草稿） */
+      S.pendingManual = false;
+      if (S.pendingSave) saveCloud(wantManual);
     }).catch(function (e) {
       S.saving = false;
+      S.inflightSeq = 0;
+      S.pendingSave = true;   /* 本次没存上，改动仍在，保留待保存标记供下次尝试 */
+      S.pendingManual = false; /* 失败已提示，不留到下一次成功时误报回执 */
       setSavedTip('is-dirty', '云端保存失败');
       if (manual) toast('保存失败：' + e.message, true);
     });
   }
+
+  /* ═════════ editor-richtext.js 依赖的桥接（原 editor.js 的 __edBridge 契约）═════════
+     真实模板模块只消费：State / persistLocal / setDirtyTip / loadRealStructure /
+     runAtsCheck(可选) / realBoxTexts(旧热区草稿迁移，v3 恒为空)。 */
+  window.__edBridge = {
+    State: S,
+    /* 富文本模块每次盒子编辑/加载成功都会调 persistLocal —— 升级为 markDirty，
+       让本地兜底与云端 3s 防抖保存与经典模式同一条链路，rtEdits 才能进云草稿 */
+    persistLocal: function () { markDirty(); },
+    setDirtyTip: function () { /* v3 顶栏无同步胶囊，保留调用点为空操作 */ },
+    loadRealStructure: function (tid) {
+      /* 复杂版式 422 / 解析超时：v3 没有旧「热区弹窗」模式，诚实回退到内置版式 */
+      var r = rt();
+      if (r && r.reset) r.reset();
+      S.templateId = null;
+      setEditorMode('classic');
+      toast('该模板为复杂版式，暂不支持在线编辑；已切回内置版式，可在「更换模板」另选或使用下载原件', true);
+    },
+    get realBoxTexts() { return {}; }
+  };
 
   function bindTopbar() {
     $('saveBtn').onclick = function () { saveCloud(true); };
@@ -1517,6 +1627,7 @@
       var thumb = card.querySelector('.v3-tpl-thumb');
       card.__preset = p;
       card.addEventListener('click', function () {
+        if (S.editorMode === 'richtext') backToClassic();
         S.theme.family = p.family;
         S.theme.theme = p.theme;
         S.theme.primary = ResumeRender.THEMES[p.theme].accent;
@@ -1539,8 +1650,79 @@
         page.style.transformOrigin = 'top left';
       });
     });
+    buildRealTplGrid();
     $('tplModal').hidden = false;
   }
+
+  /* ── 真实 Word 模板区：拉 /templates，卡片用真实预览图，点击进富文本就地编辑 ── */
+  var REAL_TPLS = null;   // 缓存：[{id,name,preview_url,editable}]
+  function buildRealTplGrid() {
+    var grid = $('realTplGrid'), title = $('realTplTitle'), loading = $('realTplLoading');
+    if (!grid) return;
+    var r = rt();
+    if (!r) { if (title) title.hidden = true; grid.innerHTML = ''; return; }
+    if (REAL_TPLS) { renderRealCards(REAL_TPLS); return; }
+    if (loading) loading.hidden = false;
+    apiGet('/templates').then(function (list) {
+      if (loading) loading.hidden = true;
+      var arr = Array.isArray(list) ? list : [];
+      REAL_TPLS = arr.filter(function (t) { return t && t.id && (t.editable === undefined || parseInt(t.editable, 10) === 1); });
+      renderRealCards(REAL_TPLS);
+    }).catch(function () {
+      if (loading) loading.hidden = true;
+      if (title) title.hidden = true;
+      grid.innerHTML = '';
+    });
+  }
+
+  function renderRealCards(arr) {
+    var grid = $('realTplGrid'), title = $('realTplTitle');
+    if (!grid) return;
+    grid.innerHTML = '';
+    if (!arr || !arr.length) { if (title) title.hidden = true; return; }
+    if (title) title.hidden = false;
+    arr.forEach(function (t) {
+      var cfg = t.config || {};
+      var rt = cfg.richtext_cache || {};
+      var unsupported = !!rt.unsupported;   /* 后端负缓存：复杂版式解析失败过 */
+      var card = document.createElement('div');
+      card.className = 'v3-tpl-card v3-real-card' + (S.editorMode === 'richtext' && S.templateId === t.id ? ' sel' : '');
+      card.innerHTML =
+        '<span class="v3-tpl-badge' + (unsupported ? ' warn' : '') + '">' +
+          (unsupported ? '暂不支持在线编辑' : 'Word 原件保真') + '</span>' +
+        '<div class="v3-tpl-thumb"><img class="v3-real-img" alt="" loading="lazy" src="' + esc(t.preview_url || '') + '"></div>' +
+        '<div class="v3-tpl-name">' + esc(t.name || ('模板 #' + t.id)) + '</div>';
+      card.addEventListener('click', function () {
+        if (unsupported) {
+          toast('该模板为复杂版式（艺术字/组合图形），暂不支持在线编辑，可在首页下载 Word 原件使用', true);
+          return;
+        }
+        pickRealTemplate(t);
+      });
+      grid.appendChild(card);
+    });
+  }
+
+  function pickRealTemplate(t) {
+    var r = rt();
+    if (!r) { toast('富文本编辑模块未加载', true); return; }
+    S.templateId = t.id;
+    S.templateName = t.name || '';
+    $('tplModal').hidden = true;
+    setEditorMode('richtext');
+    /* switched() 内部：reset → 显示解析骨架 → load(tid)（含 409 倒计时 / 422 回退） */
+    r.switched({ id: t.id, name: t.name });
+    markDirty();
+  }
+
+  /* 从富文本模式切回内置版式 */
+  function backToClassic() {
+    var r = rt();
+    if (r && r.reset) r.reset();
+    S.templateId = null; S.templateName = '';
+    setEditorMode('classic');
+  }
+
 
   /* ═════════ 导出 ═════════ */
 
@@ -1551,6 +1733,12 @@
   }
 
   function download(fmt) {
+    /* 真实模板模式：走 /api/richtext-export/{tid}，写回 Word 原件保真导出 */
+    var r = rt();
+    if (r && r.isActive && r.isActive() && r.exportAs) {
+      r.exportAs(fmt);
+      return;
+    }
     showLoading(fmt === 'png' ? '正在生成长图…' : fmt === 'pdf' ? '正在生成 PDF…' : '正在生成 Word…');
     fetch('/api/export/' + fmt, {
       method: 'POST',
@@ -1591,6 +1779,9 @@
           var n = normalizeData(d.data);
           S.resume = n.resume; S.theme = n.theme;
           S.draftId = d.id; S.title = d.title || '';
+          if (d.data.richtext_mode && d.template_id) {
+            S._rtPending = { tid: d.template_id, edits: d.data.richtext_edits || {} };
+          }
           setSavedTip('is-ok', '已打开云端草稿');
           return;
         }
@@ -1608,11 +1799,27 @@
           var n2 = normalizeData({ v: 3, resume: s.resume, theme: s.theme });
           S.resume = n2.resume; S.theme = n2.theme;
           S.draftId = s.draftId || null; S.title = s.title || '';
+          if (s.rtMode && s.rtTemplateId) {
+            S._rtPending = { tid: s.rtTemplateId, edits: s.rtEdits || {} };
+          }
           setSavedTip('is-ok', '已恢复本地编辑');
         }
       }
     } catch (e) { /* ignore */ }
     return Promise.resolve();
+  }
+
+  /* 草稿带真实模板：进入富文本模式并恢复编辑增量 */
+  function restoreRichtextPending() {
+    var p = S._rtPending;
+    if (!p) return;
+    S._rtPending = null;
+    var r = rt();
+    if (!r) return;
+    S.templateId = p.tid;
+    setEditorMode('richtext');
+    if (r.restoreCloud) r.restoreCloud({ richtext_mode: true, richtext_edits: p.edits, template_id: p.tid });
+    r.load(p.tid, { silent: true });
   }
 
   /* ═════════ 启动 ═════════ */
@@ -1631,6 +1838,7 @@
         bindAiModal();
         window.addEventListener('resize', debounce(layoutPaper, 150));
         setSavedTip(S.draftId ? 'is-ok' : '', S.draftId ? '已同步云端' : '自动保存已开启');
+        restoreRichtextPending();
       });
     }).catch(function (e) {
       document.body.innerHTML = '<div style="padding:60px;text-align:center;color:#8A93A6;font-size:14px">编辑器加载失败：' + esc(e.message) + '</div>';

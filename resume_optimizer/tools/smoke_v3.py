@@ -69,7 +69,8 @@ def t_merge():
 
 # ── 3) JS syntax ──
 def t_js():
-    files = ["static/editor-v3.js", "static/resume-render.js"]
+    files = ["static/editor-v3.js", "static/resume-render.js",
+             "static/resume-bind.js", "static/editor-richtext.js"]
     for f in files:
         r = subprocess.run(["node", "--check", str(BASE / f)], capture_output=True, text=True)
         assert r.returncode == 0, "%s: %s" % (f, r.stderr[:200])
@@ -82,8 +83,24 @@ def t_js():
             r = subprocess.run(["node", "--check", str(tmp)], capture_output=True, text=True)
             assert r.returncode == 0, "%s inline: %s" % (html, r.stderr[:200])
     ed = (BASE / "static/editor.html").read_text(encoding="utf-8")
-    assert "editor.js" not in ed and "editor.css" not in ed and "editor-richtext" not in ed
+    assert "editor.js" not in ed and "editor.css" not in ed
     assert "editor-v3.js" in ed and "resume-render.js" in ed
+    # 真实模板「文档直接编辑」模式已接线：模块 + 样式 + 桥接挂载点齐备
+    assert "editor-richtext.js" in ed, "editor.html 未加载 editor-richtext.js"
+    assert "editor-richtext.css" in ed, "editor.html 未加载 editor-richtext.css"
+    assert 'id="previewPaper"' in ed, "editor.html 缺少富文本纸面 #previewPaper"
+    assert 'id="moduleList"' in ed, "editor.html 缺少文档导航 #moduleList"
+    v3 = (BASE / "static/editor-v3.js").read_text(encoding="utf-8")
+    assert "__edBridge" in v3, "editor-v3.js 未暴露 __edBridge（richtext 依赖）"
+    assert "richtext_mode" in v3, "editor-v3.js 未在草稿中持久化 richtext_mode"
+    rtjs = (BASE / "static/editor-richtext.js").read_text(encoding="utf-8")
+    assert "__edBridge" in rtjs and "RichtextMode" in rtjs
+    # B 阶段：槽位映射模块已接线（seed + writeback 两个钩子都在）
+    assert "resume-bind.js" in ed, "editor.html 未加载 resume-bind.js"
+    rb = (BASE / "static/resume-bind.js")
+    assert rb.exists(), "static/resume-bind.js 缺失"
+    assert "seedFromResume()" in rtjs, "richtext 未接 seed 钩子"
+    assert "applyBoxEdit" in rtjs, "richtext 未接 writeback 钩子"
     admin = (BASE / "static/admin.html").read_text(encoding="utf-8")
     for token in ["vipUserCard", "mappingCard", "aliasCard", "cfgModal", "user-vip"]:
         assert token not in admin, "admin.html still has " + token
@@ -155,6 +172,65 @@ def t_mix_theme():
     assert '"#1E5AE8"' in r.stdout and "true" in r.stdout, r.stdout
 
 
+# ── 7) resume-bind seed/writeback round-trip (offline fixture) ──
+def t_resume_bind_roundtrip():
+    js = r"""
+const RB = require('%(RB)s');
+const structure = { boxes: [
+  { id: 0, kind: "free", role: null, y: 40, placeholders: ["求职意向"], text: "简历模板资源网\n求职意向：{{求职意向}}" },
+  { id: 1, kind: "field", role: "basic", y: 60, placeholders: ["姓名"], text: "{{姓名}}" },
+  { id: 2, kind: "content", role: "education", y: 200, placeholders: ["工作经历"], text: "2014年寒假 肯德基 服务员" },
+  { id: 3, kind: "title", role: "education", y: 190, placeholders: [], text: "教育背景" },
+  { id: 4, kind: "content", role: "basic", y: 240, placeholders: ["教育背景"], text: "{{教育背景}}\n主修课程：样例课" },
+  { id: 6, kind: "field", role: "basic", y: 120, placeholders: ["所在地", "电话", "邮箱"],
+    text: "生日：1994.04.06\n性别：男\n现居：{{所在地}}\n电话：{{电话}}\n邮箱：{{邮箱}}" },
+  { id: 8, kind: "content", role: "internship", y: 320, placeholders: [], text: "2016年暑假 某银行 大堂经理" }
+]};
+const resume = { basic: { name: "测试员", intention: "数据分析师", phone: "13800000000",
+    email: "t@e.com", city: "贵阳", gender: "男", birth_date: "1995-01-02" },
+  modules: {
+    education: [{ school: "测试大学", major: "计算机", degree: "本科", start: "2020-09", end: "2024-06", content: "主修：数据结构" }],
+    internship: [{ company: "大华科技", position: "数据实习生", start: "2025-01", end: "2025-06", content: "看板搭建" }],
+    work: [{ company: "某某银行", position: "大堂经理", start: "2016-07", end: "2017-09", content: "客户服务" }],
+    project: [], campus: [], skill: [], honor: [], self: "细致耐心。", custom: "", hobby: [] } };
+const fails = [];
+const assert = (cond, msg) => { if (!cond) fails.push(msg); };
+const txt = e => e && e.paragraphs.map(p => p.runs.map(r => r.text).join("")).join("\n");
+
+/* seed: role 语义优先于误标 role（box2 占位符=工作经历 → work 记录） */
+const edits = RB.seedEdits(structure, resume);
+assert(txt(edits[2]).includes("某某银行"), "box2 work seed");
+assert(txt(edits[2]).includes("2016-07 - 2017-09"), "box2 period");
+assert(txt(edits[4]).includes("测试大学"), "box4 education seed");
+assert(!txt(edits[4]).includes("样例课"), "box4 sample purged");
+assert(txt(edits[1]) === "测试员", "box1 name");
+assert(txt(edits[6]).includes("1995-01-02") && txt(edits[6]).includes("13800000000"), "box6 labels");
+assert(txt(edits[6]).indexOf("1994") < 0, "box6 sample birthday purged");
+assert(txt(edits[8]).includes("大华科技"), "box8 internship by declared role");
+assert(txt(edits[0]).includes("数据分析师"), "box0 intention");
+
+/* writeback: 编辑盒子 → 结构化字段，且解析不丢整段 */
+const r2 = JSON.parse(JSON.stringify(resume));
+assert(RB.applyBoxEdit(structure, r2, 8, "2025年3月 - 2025年8月    新公司    新岗位\n改过的描述"), "wb8 ok");
+assert(r2.modules.internship[0].company === "新公司", "wb8 company: " + JSON.stringify(r2.modules.internship[0]));
+assert(r2.modules.internship[0].content === "改过的描述", "wb8 content");
+assert(r2.modules.internship[0].start === "2025-03", "wb8 start");
+assert(RB.applyBoxEdit(structure, r2, 6, "生日：1996.02.03\n性别：女\n现居：上海\n电话：13911112222\n邮箱：a@b.c"), "wb6 ok");
+assert(r2.basic.city === "上海" && r2.basic.phone === "13911112222" && r2.basic.gender === "女", "wb6 basic");
+/* 换模板 → 新结构 seed 出同样内容（内容跟模板走，与 box.id 无关） */
+const edits2 = RB.seedEdits(structure, r2);
+assert(txt(edits2[8]).includes("新公司"), "reseed follows writeback");
+/* coverage */
+const cov = RB.coverage(structure, resume);
+assert(cov.work && cov.work.records === 1 && cov.work.boxes === 1, "coverage work");
+console.log(fails.length ? "FAILS: " + fails.join(" | ") : "ROUNDTRIP-OK");
+process.exit(fails.length ? 1 : 0);
+""" % {"RB": str(BASE / "static" / "resume-bind.js").replace("\\", "/")}
+    r = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+    assert r.returncode == 0, (r.stdout + r.stderr)[:400]
+    assert "ROUNDTRIP-OK" in r.stdout, r.stdout[:400]
+
+
 for name, fn in [
     ("deleted endpoints + kept routes in main.py", t_deleted_endpoints),
     ("_merge_editor_boxes overrides/added", t_merge),
@@ -162,6 +238,7 @@ for name, fn in [
     ("export round-trip docx->pdf->long png", t_export_roundtrip),
     ("added-box injection into real template", t_added_injection),
     ("resume-render mixTheme accent", t_mix_theme),
+    ("resume-bind seed/writeback round-trip", t_resume_bind_roundtrip),
 ]:
     check(name, fn)
 
