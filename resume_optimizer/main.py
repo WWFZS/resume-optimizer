@@ -1277,6 +1277,26 @@ def _build_modules(labels) -> list:
     return mods
 
 
+def _filter_modules_to_disk(mods: list, disk_labels: set) -> tuple:
+    """只保留「磁盘模板里确实存在对应 {{占位符}}」的模块。
+
+    缺陷修复（B4）：template_placeholders 里记了 docx 中不存在的标签时，
+    填充阶段按标签找不到占位符会**静默跳过** —— 用户填的内容凭空消失，
+    且全程无报错。这里做最后一道闸：DB 标签 ⊆ 磁盘实际占位符。
+
+    返回 (保留后的模块列表, 被剔除的模块列表)。
+    """
+    kept = []
+    dropped = []
+    for m in mods:
+        label = str(m.get("label") or "").strip()
+        if label in disk_labels:
+            kept.append(m)
+        else:
+            dropped.append(label)
+    return kept, dropped
+
+
 async def _process_upload(file: UploadFile, name: str = "", description: str = "",
                           modules: str = "", config: str = "{}",
                           is_vip: int = 0) -> dict:
@@ -1301,19 +1321,39 @@ async def _process_upload(file: UploadFile, name: str = "", description: str = "
     tid_preview = db.get_max_template_id() + 1
     _generate_preview(tpl_path, tid_preview)
     # 自动补占位符
+    # 缺陷修复（B4）：
+    #   旧实现把「注入产物」与「磁盘模板文件」的关系搞反了 ——
+    #   注入结果只写进 auto_inject_result，磁盘文件仅在 labels_found 非空时
+    #   才回写；而 DB 标签来源是 found ∪ auto_inject.labels_found ∪ meta["modules"]
+    #   的并集。meta["modules"] 来自 detect_metadata 对**原始文件**的静态标题推断，
+    #   磁盘上根本没有对应 {{占位符}} 的模块也被记进 DB → 填充阶段静默跳过，
+    #   用户内容凭空消失且无任何报错。
+    #   现在：注入成功必须落盘；DB 标签一律以「回写后磁盘文件实际扫描结果」为准。
     auto_inject_result = None
     required_ph = {"姓名", "联系方式", "个人优势", "工作经历", "教育背景"}
     if not (required_ph & found) and ("电话" not in found or "邮箱" not in found):
         from utils.auto_placeholder import auto_inject_placeholders
+        injected_path = TEMPLATES_DIR / f"auto_{fname}"
         try:
-            injected_path = TEMPLATES_DIR / f"auto_{fname}"
             auto_inject_result = auto_inject_placeholders(tpl_path, injected_path)
-            if auto_inject_result.get("labels_found"):
+            injected_labels = auto_inject_result.get("labels_found") or []
+            if injected_labels:
+                # A. 注入必须落盘：把注入后的内容写回模板文件本身
                 tpl_path.write_bytes(injected_path.read_bytes())
-                safe_unlink(injected_path)
-                found = set(auto_inject_result["labels_found"])
+                found = set(injected_labels)
+            else:
+                # 注入没产出任何占位符：视为未生效，磁盘文件保持原样，
+                # 此时**绝不能**把注入态标签写进 DB。
+                auto_inject_result["error"] = auto_inject_result.get("error") or "注入未产出任何占位符"
         except Exception as exc:  # noqa: BLE001
+            # 注入异常：磁盘文件保持原样，DB 标签退化为原始文件实际占位符，
+            # 不会记入任何「注入态」的标签。
             auto_inject_result = {"error": str(exc)[:120]}
+        finally:
+            safe_unlink(injected_path)
+    # B. 权威标签集：回写后**重新扫描磁盘文件**，
+    #    DB 里写的每个 label 都必须能在磁盘文件里找到对应的 {{label}}。
+    found = _scan_placeholders(tpl_path)
     # 名称/描述/模块自动识别
     if not name or not description or not modules:
         from utils.auto_placeholder import detect_metadata
@@ -1321,11 +1361,10 @@ async def _process_upload(file: UploadFile, name: str = "", description: str = "
         name = name or meta["name"]
         description = description or meta["description"]
         if not modules:
+            # C. 不再把 meta["modules"]（静态标题推断）并进占位符标签 ——
+            #    它只用于生成描述文案，不作为 DB 占位符来源。
+            #    DB 标签 = 磁盘文件实际存在的占位符。
             labels = sorted(set(found))
-            if auto_inject_result and auto_inject_result.get("labels_found"):
-                labels = sorted(set(auto_inject_result["labels_found"]))
-            if meta.get("modules"):
-                labels = sorted(set(labels) | set(meta["modules"]))
             mods = _build_modules(labels)
         else:
             import json as _json
@@ -1344,6 +1383,12 @@ async def _process_upload(file: UploadFile, name: str = "", description: str = "
         except Exception:
             mods = []
     if not mods:
+        mods = _build_modules(sorted(set(found)))
+    # 最后一道闸：DB 里记的每个标签都必须能在磁盘模板里找到对应的 {{占位符}}。
+    # 管理员手工指定的模块若模板里没有对应占位符，也会被剔除（否则用户内容静默丢失）。
+    mods, dropped_modules = _filter_modules_to_disk(mods, set(found))
+    if not mods and found:
+        # 过滤后为空但磁盘确有占位符：按磁盘实际标签重建（这些标签必然都在磁盘上）
         mods = _build_modules(sorted(set(found)))
     try:
         cfg = json.loads(config)
@@ -1368,6 +1413,9 @@ async def _process_upload(file: UploadFile, name: str = "", description: str = "
         "unknown_placeholders": sorted(unknown),
         "auto_detected": {"name": name, "modules": [m["label"] for m in mods]},
     }
+    if dropped_modules:
+        # 被剔除的模块：模板里没有对应 {{占位符}}，登记进来便于管理员核查
+        report["dropped_modules_no_placeholder"] = sorted(dropped_modules)
     if auto_inject_result and auto_inject_result.get("injected"):
         report["auto_inject"] = {
             "injected": auto_inject_result.get("injected"),

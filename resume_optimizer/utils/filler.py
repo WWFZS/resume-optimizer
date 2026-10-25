@@ -8,8 +8,9 @@
 """
 import copy
 import re
+import threading
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -17,9 +18,39 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Mm
 from docx.text.paragraph import Paragraph
 
-from . import reflow, section_mapper
+from . import placeholders, reflow, section_mapper
+from .placeholders import PLACEHOLDER_RE
 
-PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+# 未填充标签的收集器：填充过程中遇到「没填上」的占位符就记一笔，
+# 由 fill_template() 汇总进 stats["unfilled_labels"]。
+# 放模块级是为了让 _apply_replacements() 这类深层调用不必层层传参；
+# 用 thread-local 存放，避免并发填充（同步端点在 FastAPI 线程池里跑）互相串数据。
+_UNFILLED_LOCAL = threading.local()
+
+
+def _unfilled_list() -> List[str]:
+    """取当前线程的未填充标签列表（没有就建一个）。"""
+    lst = getattr(_UNFILLED_LOCAL, "items", None)
+    if lst is None:
+        lst = []
+        _UNFILLED_LOCAL.items = lst
+    return lst
+
+
+def _reset_unfilled() -> None:
+    """清空未填充标签收集器（每次填充开始前调用）。"""
+    _UNFILLED_LOCAL.items = []
+
+
+def _record_unfilled(label: str, reason: str = "") -> None:
+    """记录一个未填充/未命中的占位符标签（去重，保持出现顺序）。"""
+    text = str(label or "").strip()
+    if not text:
+        return
+    item = text if not reason else f"{text}（{reason}）"
+    lst = _unfilled_list()
+    if item not in lst:
+        lst.append(item)
 MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 # 「标签：值」字段对（值不含空格），用于清空模板示例值
 _PAIR_SPLIT_RE = re.compile(r"([^\s：:]{1,16})\s*[：:]\s*([^\s：:]+)")
@@ -430,6 +461,18 @@ def normalize_docx(doc, photo_path=None, primary_color=None,
     return stats
 
 
+def _resolve_content(label: str, content_map: Dict[str, str], concept=None):
+    """标签 → (命中的 content_map 键, 归一结果)。
+
+    归一走 utils.placeholders.resolve_label()：模板写 {{ 工作经验 }}、{{项目经验}}、
+    {{name}} 等同义写法都能命中 content_map 的标准键；命中不了返回 (None, res)，
+    由调用方保留模板原文并记 warning，绝不清空用户内容。
+    concept：调用方已知的概念（如字段行识别出的 address），优先于自动识别。
+    """
+    res = placeholders.resolve_label(label, content_map, concept=concept)
+    return res.key, res
+
+
 def _apply_replacements(para: Paragraph, content_map: Dict[str, str],
                         photo_path: Union[str, Path, None]) -> None:
     """处理一个段落内的占位符替换。"""
@@ -446,9 +489,18 @@ def _apply_replacements(para: Paragraph, content_map: Dict[str, str],
                 "照片" in label or "photo" in label.lower() or label.lower() == "avatar"):
             _insert_photo(para, photo_path)
             return
-        content = _normalize_spaces(content_map.get(label, ""))
+        key, res = _resolve_content(label, content_map)
+        if key is None:
+            # 未命中（别名已知但 content_map 缺键 / 完全未知标签）：
+            # 保留模板原文 + 记 warning，让用户看得见「这段没填上」，不清空
+            _record_unfilled(res.raw or label, res.reason)
+            return
+        content = _normalize_spaces(content_map.get(key, ""))
         lines = [ln.strip() for ln in (content or "").split("\n") if ln.strip()]
         if not lines:
+            # 键存在但内容为空（用户没有这部分数据）：清空该段并记一条告警
+            # （清空是原有行为；此时占位符已归一成功，不存在「归一失败丢内容」风险）
+            _record_unfilled(res.raw or label, "内容为空")
             _set_para_text(para, "")
             return
         _set_para_text(para, lines[0])
@@ -464,13 +516,20 @@ def _apply_replacements(para: Paragraph, content_map: Dict[str, str],
     # 旧实现用 replace("{{"+label+"}}") 只能匹配无空格的原文形态，
     # 带空格的占位符永远替换不掉，导出 Word 会残留 {{ }}。
     def _repl(m):
-        key = m.group(1).strip()
-        if key not in content_map:
+        raw_label = m.group(1).strip()
+        key, res = _resolve_content(raw_label, content_map)
+        if key is None:
             # 未命中的标签保持原样（不替换成空），避免误删模板内容
+            _record_unfilled(res.raw or raw_label, res.reason)
             return m.group(0)
         repl = _normalize_spaces(content_map.get(key, ""))
+        if not repl:
+            # 命中的键内容为空（用户没有这部分数据）：替换为空并记一条告警
+            # （清空是原有行为；此时占位符已归一成功，不存在「归一失败丢内容」风险）
+            _record_unfilled(res.raw or raw_label, "内容为空")
+            return ""
         # 联系方式按上下文拆分：电话：{{联系方式}} 只填电话，邮箱：{{联系方式}} 只填邮箱
-        if key == "联系方式":
+        if placeholders.is_contact_label(raw_label) or key in placeholders.CONTACT_CANDIDATES:
             if re.search(r"电话|手机|Tel|Phone", text, re.IGNORECASE) and content_map.get("电话"):
                 repl = content_map["电话"]
             elif re.search(r"邮箱|Email|E-mail|Mail|邮件", text, re.IGNORECASE) and content_map.get("邮箱"):
@@ -496,6 +555,8 @@ def fill_template(
     返回排版统计信息（含输出路径）。所有含 {{}} 的段落（含表格/文本框内）都会被处理。
     """
     doc = Document(str(template_path))
+    # 清空本轮的未填充标签收集器
+    _reset_unfilled()
     # 先删除 pdf2docx 产生的重复副本（此时占位符仍在，可按标签识别）
     removed_fallback = _remove_fallback_duplicates(doc)
     # 全区域清空模板示例内容（保留标题/装饰/占位符），杜绝旧数据残留
@@ -512,6 +573,12 @@ def fill_template(
     tx_before = doc.element.findall(".//" + qn("w:txbxContent"))
     redirects = (_redirect_sections(mapping_before, content_map, tx_before)
                  if mapping_before else {})
+    # 重定向板块的标准标签集合：识别同一板块的不同写法（工作经历/工作经验同属一个标签）
+    redirect_sections = set()
+    for _lab in redirects:
+        _c = placeholders.concept_of(_lab)
+        if _c and _c[0] == "section":
+            redirect_sections.add(placeholders.SECTION_CANDIDATES.get(_c[1], [_lab])[0])
     # 固化段落列表，避免复制插入的段落被重复遍历
     para_elems = [p for p in doc.element.iter(qn("w:p"))]
     filled_labels: set = set()
@@ -525,10 +592,20 @@ def fill_template(
         if textbox_based and not _is_in_textbox(p_elem) and not _is_in_table(p_elem):
             _set_para_text(para, "")
             continue
-        labels = {m.group(1).strip() for m in PLACEHOLDER_RE.finditer(text)}
+        # 标签统一归一：
+        #  - labels：content_map 实际取值的键（同一内容只填一次，防重复）
+        #  - sections：标签所属板块的标准标签（用于与重定向板块比对）
+        labels = set()
+        sections = set()
+        for raw in placeholders.extract_labels(text):
+            res = placeholders.resolve_label(raw, content_map)
+            labels.add(res.key or res.raw)
+            concept = placeholders.concept_of(raw)
+            if concept and concept[0] == "section":
+                sections.add(placeholders.SECTION_CANDIDATES.get(concept[1], [res.raw])[0])
         is_whole = bool(PLACEHOLDER_RE.fullmatch(text.strip()))
         # 重定向板块：内容将填入板块自己的内容框，这里清空占位符段避免重复
-        if is_whole and labels and labels <= set(redirects.keys()):
+        if is_whole and sections and sections <= redirect_sections:
             _set_para_text(para, "")
             continue
         # 同一字段只填充一次：仅对“整段占位符”的重复副本清空（防内容重复/重叠）；
@@ -543,7 +620,10 @@ def fill_template(
     if redirects:
         tx_now = doc.element.findall(".//" + qn("w:txbxContent"))
         for label, sec in redirects.items():
-            data = _normalize_spaces(content_map.get(label, "")).strip()
+            # 标签同样走归一（redirects 的键来自 content_map 的别名命中，
+            # 但仍按标准键取一次，避免标签写法差异导致取不到内容）
+            _rkey, _rres = _resolve_content(label, content_map)
+            data = _normalize_spaces(content_map.get(_rkey or label, "")).strip()
             if not data or not sec["boxes"]:
                 continue
             # Choice/Fallback 双框同位置：全部填入，保证任意渲染器都可见
@@ -557,6 +637,8 @@ def fill_template(
     stats["mixed_cleaned"] = mixed_cleaned
     stats["name_replaced"] = name_replaced
     stats["collapsed_boxes"] = _collapse_empty_boxes(doc)
+    # 未填充/未命中的占位符标签（供前端提示；普通 list，可 JSON 序列化）
+    stats["unfilled_labels"] = list(_unfilled_list())
     doc.save(str(out_path))
 
     # 流式模板（无文本框）：统一压缩到单页（字号/边距按内容量自动适配）
@@ -817,7 +899,11 @@ def _fill_mapped_fields_from_map(doc, content_map: Dict[str, str]) -> int:
     for f in mapping["fields"]:
         value = ""
         for label in FIELD_KEY_LABELS.get(f["key"], []):
-            v = content_map.get(label)
+            # 标签统一归一后取值：模板字段行写「手机号码」也能取到 content_map 的「电话」。
+            # 概念由字段行识别结果给出（f["key"]），避免「地址」被当成 city。
+            _k, _res = _resolve_content(label, content_map,
+                                       concept=("field", f["key"]))
+            v = content_map.get(_k or label)
             if v:
                 value = v
                 break
@@ -907,11 +993,18 @@ def fill_mapped_template(
     return stats
 
 
-def verify_fill(docx_path: Union[str, Path], expect: Dict[str, str] = None) -> List[str]:
+def verify_fill(docx_path: Union[str, Path], expect: Dict[str, str] = None,
+                content_map: Dict[str, str] = None,
+                template_path: Union[str, Path, None] = None) -> List[str]:
     """输出自检（方案第六节4条校验的自动版）：
     - 无残留 {{占位符}}；
     - 模板具备且用户提供的固定信息（姓名/电话等）应出现在输出中；
-    返回警告列表，供前端提示。"""
+    - 模板里每个占位符标签对应的内容都真的填进了输出（缺一个报一条）；
+    返回警告列表，供前端提示。
+
+    content_map：填充时用的内容字典（用于比对每个标签应有非空值）；
+    template_path：模板原文件路径（用于取出模板里出现过的全部标签）。
+    两者都不给时，退化为「输出里还有没有残留 {{}}」。"""
     warnings = []
     doc = Document(str(docx_path))
     alltext = []
@@ -933,4 +1026,85 @@ def verify_fill(docx_path: Union[str, Path], expect: Dict[str, str] = None) -> L
         for label, value in expect.items():
             if value and value not in full:
                 warnings.append(f"{label}（{value[:20]}）未出现在结果中，请检查模板是否有对应字段")
+    # ① 输出里残留的占位符 → 逐个报出「哪个标签没填上」
+    warnings.extend(_verify_residual_labels(full, content_map))
+    # ② 模板里的每个标签 → 对照 content_map 与输出，逐个核对是否真的填进去
+    warnings.extend(_verify_labels_filled(docx_path, template_path, content_map, full))
+    # 同一条告警可能出现两次（残留占位符 + 模板标签核对），去重保序
+    out = []
+    for w in warnings:
+        if w not in out:
+            out.append(w)
+    return out
+
+
+def _verify_residual_labels(full: str,
+                            content_map: Optional[Dict[str, str]]) -> List[str]:
+    """输出里残留的 {{占位符}} → 逐个报出未填充的标签。
+
+    归一失败/内容为空的占位符会原样留在输出里（不再被清空），
+    这里把它们翻译成「板块『X』未填充」这类可读提示。
+    """
+    warnings = []
+    seen = set()
+    for raw in placeholders.extract_labels(full):
+        if raw in seen:
+            continue
+        seen.add(raw)
+        res = placeholders.resolve_label(raw, content_map)
+        name = res.canonical or raw
+        kind = placeholders.key_kind(name)
+        what = "板块" if kind == "section" else ("字段" if kind == "field" else "内容项")
+        warnings.append(f"{what}『{name}』未填充")
+    return warnings
+
+
+def _template_labels(template_path: Union[str, Path, None]) -> List[str]:
+    """列出模板里出现过的全部占位符标签（按出现顺序去重）。"""
+    if not template_path:
+        return []
+    try:
+        tdoc = Document(str(template_path))
+    except Exception:  # noqa: BLE001 模板读不了就跳过这项检查
+        return []
+    out = []
+    for pe in tdoc.element.iter(qn("w:p")):
+        text = Paragraph(pe, tdoc).text or ""
+        for raw in placeholders.extract_labels(text):
+            if raw not in out:
+                out.append(raw)
+    return out
+
+
+def _verify_labels_filled(docx_path: Union[str, Path],
+                           template_path: Union[str, Path, None],
+                           content_map: Optional[Dict[str, str]],
+                           full: str) -> List[str]:
+    """逐个检查模板里的占位符标签是否真的填进了输出。
+
+    以填充时用的 content_map 为准（比在输出文本里搜索可靠：内容可能被
+    换行/多 run 打散）：模板里有该标签、content_map 里该标签有内容，
+    但输出里找不到 → 报「板块『X』未填充」。
+    """
+    warnings = []
+    if not content_map:
+        return warnings
+    labels = _template_labels(template_path)
+    if not labels:
+        return warnings
+    # 输出文本去掉空白后再比对，避免内容被换行/多 run 打散导致漏判
+    flat = placeholders.squash(full)
+    for raw in labels:
+        res = placeholders.resolve_label(raw, content_map)
+        if res.key is None:
+            # 模板里的标签在 content_map 中找不到对应内容项：
+            # content_map 本身没这个键 → 无法判定「应有值」，跳过
+            continue
+        value = content_map.get(res.key) or ""
+        if not str(value).strip():
+            continue
+        if placeholders.squash(value) and placeholders.squash(value) not in flat:
+            kind = placeholders.key_kind(res.canonical or res.key)
+            what = "板块" if kind == "section" else ("字段" if kind == "field" else "内容项")
+            warnings.append(f"{what}『{res.canonical or raw}』未填充")
     return warnings

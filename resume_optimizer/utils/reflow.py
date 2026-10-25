@@ -280,55 +280,152 @@ def _is_decorative(unit: BoxUnit, page_w_pt: float) -> bool:
     return False
 
 
-def _reflow_group(units: List[BoxUnit], page_h_pt: float, gap_pt: float) -> None:
+def _reflow_group(units: List[BoxUnit], page_h_pt: float, gap_pt: float) -> Dict[str, object]:
     """保守排版：只调整内容文本框高度适配文字，必要时缩小字号。
 
     不做组高/锚点范围/位置的修改——部分 pdf2docx 模板的文本框在组内有
     大偏移（oy >> 组高），改组高会让 Word 判定文档损坏。
+
+    参数：
+    - page_h_pt：底部安全线（pt），由调用方按文档实际纸张高度传入；
+    - gap_pt：组内相邻条目之间的设计间距（pt），用于估算所需高度。
+
+    返回本组的排版结果：是否仍然溢出、估算底部、是否压缩过字号等。
     """
+    usable_h = float(page_h_pt)
+    gap = max(0.0, float(gap_pt))
+    result: Dict[str, object] = {
+        "overflow": False,
+        "bottom": 0.0,
+        "usable_h": usable_h,
+        "compressed": False,
+        "min_font_pt": 0.0,
+        "gap_pt": gap,
+    }
     if not units:
-        return
+        return result
     units.sort(key=lambda u: u.top)
-    usable_h = 842.0  # 底部安全线统一为 A4 页高 842pt
+
+    fonts_before = [u.content["font"] for u in units]
+    # 记录原始纵坐标：fit() 是纯计算，位移最后统一应用，避免重复累加
+    base_tops = [u.top for u in units]
 
     def fit():
-        """按原位置估算底部位置，内容框高度贴合文字。"""
+        """按原位置估算底部位置，内容框高度贴合文字。
+
+        组内纵向相邻（且不左右并排）的条目之间按 gap_pt 留白：
+        若上一条目的文字底部与本条目顶部的空白小于 gap_pt，
+        则把本条目及其后续条目整体下移，补足设计间距。
+        返回 (各条目需下移的距离, 估算底部)。
+        """
+        shifts = []
+        shift = 0.0            # 累积下移量（后续条目需同步下移）
+        prev_design_end = None  # 上一条目的「设计」底部（模板原布局，用于相邻判定）
+        prev_text_end = None   # 上一条目的「文字」底部（内容实际占位，用于间距计算）
         bottom = 0.0
-        for u in units:
+        for u, base_top in zip(units, base_tops):
             content_h = u.content_height()
             content_box_h = max(content_h, 12.0)
             u.set_content_height(content_box_h)
+            oy = u.content.get("oy", 0)
             # 底部估算：内容框位于组内（oy 偏移后的底部）
-            u.new_h = max(u.content.get("oy", 0) + content_box_h, u.other_bottom, u.orig_h)
-            bottom = max(bottom, u.top + u.new_h)
-        return bottom
+            u.new_h = max(oy + content_box_h, u.other_bottom, u.orig_h)
+            cur_top = base_top + shift
+            delta = 0.0
+            # 纵向相邻判定：以模板原布局为准（base_top 在上一条目设计底部之下）。
+            # 与上一条目纵向重叠的（左右并排/叠放设计）不算相邻，不加间距。
+            if prev_design_end is not None and base_top >= prev_design_end - 1.0:
+                # 间距要求：两条目的文字之间至少留 gap_pt 空白
+                need = prev_text_end + gap - oy
+                if cur_top < need - 1.0:
+                    delta = need - cur_top
+                    shift += delta
+                    cur_top = base_top + shift
+            shifts.append(delta)
+            prev_design_end = base_top + u.orig_h
+            prev_text_end = cur_top + oy + content_box_h
+            bottom = max(bottom, cur_top + u.new_h)
+        return shifts, bottom
 
-    bottom = fit()
-    if bottom <= usable_h:
-        return
-    # 超出：统一压缩字号（保持原位置）
-    for step in range(8):
-        if bottom <= usable_h:
-            break
-        shrunk = False
-        for u in units:
-            fs = u.content["font"]
-            if fs > 7.5:
-                _set_content_font_size(u, fs - 0.5)
-                shrunk = True
-        if not shrunk:
-            break
-        bottom = fit()
+    shifts, bottom = fit()
+    if bottom > usable_h:
+        # 超出：统一压缩字号（保持原位置）
+        for _step in range(8):
+            if bottom <= usable_h:
+                break
+            shrunk = False
+            for u in units:
+                fs = u.content["font"]
+                if fs > 7.5:
+                    _set_content_font_size(u, fs - 0.5)
+                    shrunk = True
+            if not shrunk:
+                break
+            shifts, bottom = fit()
+        # 是否真的压缩过：与压缩前的字号对比
+        result["compressed"] = any(
+            u.content["font"] < before for u, before in zip(units, fonts_before))
+
+    # 应用位移：条目按累积量整体下移，保证组内顺序与相对位置
+    cum = 0.0
+    for u, delta in zip(units, shifts):
+        cum += delta
+        if cum > 0.0:
+            u.move_by(cum)
+            _sync_vml_fallback(u.anchor, u.top)
+
+    result["min_font_pt"] = round(min((u.content["font"] for u in units), default=0.0), 2)
+    result["bottom"] = round(bottom, 2)
+    # 压到字号下限/轮数用尽仍超出底部安全线 → 明确标记溢出（不再静默吞掉）
+    result["overflow"] = bool(bottom > usable_h)
+    return result
 
 
-def reflow_textboxes(doc, page_h_pt: float = 793.0,
+def _resolve_usable_height(doc, page_h_pt: Optional[float] = None) -> float:
+    """底部安全线（pt）：内容允许到达的最大纵坐标。
+
+    口径与 utils/validator.py、utils/template_render.py 的 SAFE_BOTTOM 一致——
+    取「页面底边」坐标（A4 = 297mm ≈ 842pt），即内容超出该线才会被推到第二页。
+    不减页边距：模板文本框是 positionV=page 的绝对定位，允许排到页边区域。
+
+    page_h_pt 传入时以其为准（调用方可按自身口径覆盖）；
+    未传入时按文档实际纸张高度推导（非 A4 模板也能得到正确安全线）。
+    """
+    if page_h_pt is not None:
+        try:
+            return float(page_h_pt)
+        except (TypeError, ValueError):
+            pass
+    try:
+        sec = doc.sections[0]
+        page_h = sec.page_height / EMU_PER_PT
+        if page_h and page_h > 0:
+            return float(page_h)
+    except Exception:  # noqa: BLE001
+        pass
+    return 842.0
+
+
+def reflow_textboxes(doc, page_h_pt: Optional[float] = None,
                      primary_color: Optional[str] = None) -> Dict[str, object]:
-    """对文本框模板做纵向重排（支持单列/双栏/多页），返回统计信息。"""
+    """对文本框模板做纵向重排（支持单列/双栏/多页），返回统计信息。
+
+    page_h_pt：底部安全线（pt）。传 None 时按文档实际纸张高度推导
+    （A4 ≈ 842pt，与 validator/template_render 的 SAFE_BOTTOM 同口径）；
+    调用方显式传入时以其为准。
+
+    返回的 stats 里 overflow=True 表示「已压到字号下限仍超出单页」，
+    供调用方提示用户精简内容（reflowed=True 只表示执行了重排）。
+    """
     page_w = doc.sections[0].page_width / EMU_PER_PT if doc.sections else 595.0
     all_units = _collect_units(doc)
     units = [u for u in all_units if not _is_decorative(u, page_w)]
     if not units:
-        return {"units": len(all_units), "reflowed": False, "decorative_skipped": len(all_units) - len(units)}
+        return {"units": len(all_units), "reflowed": False, "overflow": False,
+                "decorative_skipped": len(all_units) - len(units)}
+
+    # 底部安全线：优先用调用方传入值，否则按实际页面高度 - 上下页边距推导
+    usable_h = _resolve_usable_height(doc, page_h_pt)
 
     # 内容量 -> 间距/标题字号档位（内容越少间距越大，版面饱满）
     total = _total_chars(units)
@@ -356,13 +453,31 @@ def reflow_textboxes(doc, page_h_pt: float = 793.0,
 
     # 一页优先：每列整体重排并压缩到单页
     count = 0
-    for col in columns:
-        _reflow_group(col, page_h_pt, gap_pt)
+    overflow_cols = []
+    max_bottom = 0.0
+    compressed = False
+    min_font_pt = None
+    for idx, col in enumerate(columns):
+        gres = _reflow_group(col, usable_h, gap_pt)
         for u in col:
             _apply_heading_style(u, primary_color, h2_size)
         count += len(col)
+        max_bottom = max(max_bottom, float(gres.get("bottom") or 0.0))
+        if gres.get("overflow"):
+            overflow_cols.append(idx)
+        compressed = compressed or bool(gres.get("compressed"))
+        col_min = float(gres.get("min_font_pt") or 0.0)
+        if col_min > 0:
+            min_font_pt = col_min if min_font_pt is None else min(min_font_pt, col_min)
 
-    return {"units": count, "reflowed": True, "columns": len(columns),
+    # overflow=True 表示「已压到极限仍超出单页」，调用方可据此提示用户精简内容
+    overflow = bool(overflow_cols)
+    return {"units": count, "reflowed": True, "overflow": overflow,
+            "overflow_columns": overflow_cols,
+            "bottom": round(max_bottom, 2), "usable_h": round(usable_h, 2),
+            "compressed": compressed,
+            "min_font_pt": round(min_font_pt, 2) if min_font_pt is not None else 0.0,
+            "columns": len(columns),
             "total_chars": total, "gap_pt": gap_pt,
             "decorative_skipped": len(all_units) - len(units)}
 

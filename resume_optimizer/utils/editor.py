@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Callable, List, Tuple, Union
 
 from docx import Document
-from docx.enum.text import WD_LINE_SPACING
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
 from docx.table import Table
@@ -311,7 +310,15 @@ def fit_to_one_page(docx_path: Union[str, Path], max_font_pt: float = 11.0) -> N
 
     1. 将文本框设为自适应大小，防止内容溢出被裁剪
     2. 根据内容字数动态计算最优字号（非固定档位）
-    3. 同步调整行距、边距、段间距
+    3. 调整页边距
+
+    不再改写段落间距（行距 / 段前 / 段后）：
+    流式模板的版式由 utils/template_render.py 的「三级间距体系」定义，
+    而该体系对「什么算标题/内容」的判定词表与 utils/reflow.py、
+    utils/template_polish.py 的 _HEADING_PAT 不一致；两套规则先后改写同一份
+    文档时会互相打架（标题被当正文压紧、正文被当标题撑开），
+    最终版式既不是模板设计的，也不是任何一套规则算出来的。
+    因此本函数只负责「字号上限 + 页边距」，段落间距交还模板自身。
     """
     doc = Document(str(docx_path))
     all_paras = _collect_all_paragraphs(doc)
@@ -320,35 +327,32 @@ def fit_to_one_page(docx_path: Union[str, Path], max_font_pt: float = 11.0) -> N
     # A4 页面尺寸
     PAGE_W, PAGE_H = 21.0, 29.7
 
-    # 根据内容量选择边距/行距/段距档位
+    # 根据内容量选择边距档位；estimate_line 只用于「字号能不能装下」的估算，
+    # 不写回文档（段落行距由模板自身决定）。
     if total_chars <= 800:
         margin_tb, margin_lr = 1.2, 1.8
-        line_spacing = 1.5
-        space_before, space_after = Pt(8), Pt(4)
+        estimate_line = 1.5
     elif total_chars <= 1600:
         margin_tb, margin_lr = 1.0, 1.5
-        line_spacing = 1.35
-        space_before, space_after = Pt(5), Pt(2)
+        estimate_line = 1.35
     elif total_chars <= 2400:
         margin_tb, margin_lr = 0.6, 1.0
-        line_spacing = 1.15
-        space_before, space_after = Pt(3), Pt(1)
+        estimate_line = 1.15
     else:
         margin_tb, margin_lr = 0.4, 0.8
-        line_spacing = 1.0
-        space_before, space_after = Pt(1), Pt(0)
+        estimate_line = 1.0
 
     # 动态计算最优字号
-    font_size_pt, line_spacing = _calc_optimal_font_size(
+    font_size_pt, _ = _calc_optimal_font_size(
         total_chars, PAGE_W, PAGE_H, margin_lr, margin_tb,
-        max_size=max_font_pt, line_spacing=line_spacing
+        max_size=max_font_pt, line_spacing=estimate_line
     )
     # 不超过指定最大字号（流式渲染短内容可放大到 12pt 填满页面）
     font_size_pt = min(font_size_pt, max_font_pt)
     font_size = Pt(font_size_pt)
 
     print(f"[INFO] fit_to_one_page: {total_chars} chars → font={font_size_pt}pt, "
-          f"spacing={line_spacing}, margin_tb={margin_tb}cm, margin_lr={margin_lr}cm")
+          f"margin_tb={margin_tb}cm, margin_lr={margin_lr}cm")
 
     # 1. 文本框设为自适应
     _set_textboxes_autofit(doc)
@@ -360,20 +364,11 @@ def fit_to_one_page(docx_path: Union[str, Path], max_font_pt: float = 11.0) -> N
         section.left_margin = Cm(margin_lr)
         section.right_margin = Cm(margin_lr)
 
-    # 3. 调整所有段落的字号、行距、间距
+    # 3. 只调整字号上限；段落间距（行距/段前/段后）保持模板原样
     for para in all_paras:
         for run in para.runs:
             current_size = run.font.size
             if current_size is None or current_size > font_size:
                 run.font.size = font_size
-
-        pf = para.paragraph_format
-        pf.line_spacing = line_spacing
-        pf.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
-
-        if pf.space_before is None or pf.space_before > space_before:
-            pf.space_before = space_before
-        if pf.space_after is None or pf.space_after > space_after:
-            pf.space_after = space_after
 
     doc.save(str(docx_path))

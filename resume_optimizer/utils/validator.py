@@ -48,6 +48,83 @@ TEST_RESUME: Dict[str, str] = {
 }
 
 
+
+# ── 标准长内容 → 模板占位符的映射 ──
+# 模板里的占位符标签是中文（如「工作经历」「教育背景」「个人优势」），
+# 而 TEST_RESUME 的键是英文（work_experience/education/summary...），
+# 直接按字面取交集恒为空 —— 那会让「长内容单页」校验只用姓名+电话两条短内容
+# 渲染，任何真实长内容下会溢页的模板都能通过审核。
+# 这里按「概念」映射：模板标签先归一到标准概念，再取对应的长内容。
+_LONG_CONTENT_BY_CONCEPT = {
+    # 板块
+    'work_history': 'work_experience',
+    'education_info': 'education',
+    'skill_info': 'skills',
+    'self_evaluate': 'summary',
+    'campus_exp': 'projects',
+    'honor_cert': 'projects',
+    'projects': 'projects',
+    # 基础字段
+    'name': 'name',
+    'contact': 'contact',
+    'phone': 'contact',
+    'email': 'contact',
+    'intention_job': 'job_title',
+    'city': 'contact',
+    'location': 'contact',
+}
+
+# 兜底：标签概念识别不到时按字面同义词取
+_LONG_CONTENT_BY_LABEL = {
+    '工作经历': 'work_experience', '工作经验': 'work_experience',
+    '实习经历': 'work_experience', '工作履历': 'work_experience',
+    '教育背景': 'education', '教育经历': 'education', '学历': 'education',
+    '专业技能': 'skills', '技能': 'skills', '职业技能': 'skills',
+    '个人优势': 'summary', '自我评价': 'summary', '个人评价': 'summary',
+    '项目经历': 'projects', '项目经验': 'projects',
+    '校园经历': 'projects', '证书荣誉': 'projects',
+    '求职意向': 'job_title', '应聘岗位': 'job_title', '意向岗位': 'job_title',
+}
+
+
+def build_test_content_map(labels) -> Dict[str, str]:
+    """按模板实际拥有的占位符标签，组装「标准长内容」content_map。
+
+    标签 → 概念（utils.placeholders.concept_of）→ 标准内容键 → TEST_RESUME 值。
+    姓名/联系方式单独处理（联系方式需拆出电话与邮箱）。
+    """
+    from . import placeholders
+
+    content_map: Dict[str, str] = {}
+    for lab in labels:
+        concept = placeholders.concept_of(lab)
+        key = None
+        if concept:
+            key = _LONG_CONTENT_BY_CONCEPT.get(concept[1])
+        if key is None:
+            key = _LONG_CONTENT_BY_LABEL.get(lab.strip())
+        if key is None:
+            continue
+        content_map[lab] = TEST_RESUME.get(key, '')
+
+    # 姓名与联系方式：保证模板拿到可核对的值
+    content_map['姓名'] = TEST_RESUME['name']
+    content_map['name'] = TEST_RESUME['name']
+    content_map['联系方式'] = TEST_RESUME['contact']
+    content_map['contact'] = TEST_RESUME['contact']
+    # 拆出电话/邮箱，供「电话：{{电话}}」「邮箱：{{邮箱}}」分开展示的模板
+    m_phone = re.search(r'[0-9\- ]{7,16}', TEST_RESUME['contact'])
+    m_email = re.search(r'[\w.+-]+@[\w.-]+\.\w+', TEST_RESUME['contact'])
+    if m_phone:
+        content_map['电话'] = m_phone.group(0).strip()
+        content_map['phone'] = content_map['电话']
+        content_map['手机'] = content_map['电话']
+        content_map['手机号'] = content_map['电话']
+    if m_email:
+        content_map['邮箱'] = m_email.group(0).strip()
+        content_map['email'] = content_map['邮箱']
+    return content_map
+
 def _measure_pdf(pdf_path: str) -> dict:
     pdf = fitz.open(pdf_path)
     page = pdf[0]
@@ -132,23 +209,54 @@ def validate_template_file(template_path: Union[str, Path]) -> dict:
         para = Paragraph(pe, doc)
         for m in filler.PLACEHOLDER_RE.finditer(para.text or ""):
             labels.add(m.group(1).strip())
-    required = {"姓名", "联系方式", "个人优势", "工作经历", "教育背景"}
-    # 兼容：模板用“电话 + 邮箱”分开展示时，视为联系方式已具备
-    # 联系方式相关标签（联系方式/电话/邮箱/手机/手机号码）任一存在即视为具备
-    if "联系方式" in required and any(
-        k in labels for k in ("电话", "邮箱", "手机", "手机号码", "联系方式")
-    ):
-        required.discard("联系方式")
-    # 兼容：模板不要求包含全部五大模块（部分模板只有工作经历+教育背景等），
-    # 只要具备核心可填充字段即通过；缺失的模块在填充时自动跳过
-    if "个人优势" in required and "自我评价" in labels:
-        required.discard("个人优势")
-    # 所有模板均可上架：只要具备至少 2 个核心模块（姓名/经历/教育/评价）即可，
-    # 其余字段（联系方式等）不再强制要求，缺失时填充自动跳过
-    core = {"姓名", "工作经历", "教育背景", "个人优势", "自我评价"}
-    if len(core & labels) >= 2:
-        required = set()
-    missing = required - labels
+    # 必选占位符：按「概念」判定，而不是死抠字面。
+    # 旧实现只要命中 2 个核心标签就整段豁免（required = set()），
+    # 导致无姓名、无联系方式、无教育背景的模板也能上架。
+    #
+    # 新规则：模板要能承载用户数据，至少具备
+    #   1) 姓名位：{{姓名}} 占位符，或模板里已有的「姓名」标签行
+    #   2) 联系方式位：{{电话}}/{{邮箱}}/{{联系方式}} 占位符，或「电话/邮箱/手机/联系」
+    #      标签行，或模板里本来就有可被覆盖的联系方式数据（示例手机号/邮箱）
+    #   3) 至少一个可填充大模块（工作经历/教育背景/专业技能/项目经历/个人优势/校园经历/证书荣誉）
+    # 标签概念用 utils.placeholders.concept_of 归一，兼容同义写法。
+    from . import placeholders as _ph
+
+    _concepts = set()
+    for _lab in labels:
+        _c = _ph.concept_of(_lab)
+        if _c:
+            _concepts.add(_c[1])
+
+    # 模板全文（用于识别硬编码的「姓名：」「电话：」等标签行与示例数据）
+    _parts = []
+    for _pe in doc.element.iter(qn('w:p')):
+        _parts.append(''.join((c.text or '') for c in _pe.iter()
+                               if c.tag.split('}')[-1] == 't'))
+    _full_text = '\n'.join(_parts)
+
+    # 模板里字段标签常写成「姓    名：」这种带空格的排版（见模板 30844），
+    # 比较前先把全文的空白去掉，否则会漏判。
+    _flat = re.sub(r'\s+', '', _full_text)
+    _has_name = ('name' in _concepts) or ('姓名' in _flat)
+    _has_contact = bool({'contact', 'phone', 'email'} & _concepts) or any(
+        _k in _flat for _k in ('电话', '邮箱', '手机', '联系')
+    )
+    if not _has_contact:
+        # 模板没有联系方式标签，但自带示例手机号/邮箱（可被用户数据覆盖）
+        _has_contact = bool(re.search(r'[0-9]{7,15}', _full_text)) or bool(
+            re.search(r'[\w.+-]+@[\w.-]+\.\w+', _full_text))
+    _MODULE_CONCEPTS = {'work_history', 'education_info', 'skill_info',
+                        'self_evaluate', 'projects', 'campus_exp', 'honor_cert'}
+    _has_module = bool(_MODULE_CONCEPTS & _concepts)
+
+    missing = []
+    if not _has_name:
+        missing.append('姓名')
+    if not _has_contact:
+        missing.append('联系方式')
+    if not _has_module:
+        missing.append('至少一个可填充模块（工作经历/教育背景/专业技能等）')
+
     checks.append({"name": "必选占位符", "ok": not missing,
                    "detail": "缺失：" + "、".join(sorted(missing)) if missing else f"共 {len(labels)} 个占位符"})
     # 外链图片检查
@@ -162,9 +270,7 @@ def validate_template_file(template_path: Union[str, Path]) -> dict:
     # 长内容填充渲染体检
     tmp_dir = Path(tempfile.mkdtemp(prefix="tpl_validate_"))
     try:
-        content_map = {k: v for k, v in TEST_RESUME.items() if k in labels}
-        content_map["姓名"] = TEST_RESUME["name"]
-        content_map["联系方式"] = TEST_RESUME["contact"]
+        content_map = build_test_content_map(labels)
         out_docx = tmp_dir / "filled.docx"
         filler.fill_template(content_map, path, out_docx)
         pdf_path = tmp_dir / "filled.pdf"
@@ -190,7 +296,16 @@ def validate_template_file(template_path: Union[str, Path]) -> dict:
             checks.append({"name": "长内容单页", "ok": fits_one_page,
                            "detail": f"{m['pages']} 页，底部 {m['bottom']:.0f}pt"})
     except Exception as exc:  # noqa: BLE001
-        checks.append({"name": "长内容渲染", "ok": False, "detail": str(exc)[:120]})
+        # 常见失败：模板的固定文本框装不下标准长内容，Word 打开/转换时直接报 COM 错。
+        # 这说明模板版式容量不足（用户填满几个板块后同样会导出失败），
+        # 应当明确告诉管理员「模板装不下长内容」，而不是抛一串 COM 错误码。
+        _msg = str(exc)
+        if "Microsoft Word" in _msg or "-2147352567" in _msg:
+            _detail = ("模板版式装不下标准长内容（固定文本框容量不足）："
+                       "用户填满多个板块后导出可能失败，建议改用可自适应文本框的模板")
+        else:
+            _detail = _msg[:120]
+        checks.append({"name": "长内容渲染", "ok": False, "detail": _detail})
     finally:
         for f in list(tmp_dir.iterdir()):
             safe_unlink(f)

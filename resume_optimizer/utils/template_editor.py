@@ -19,6 +19,8 @@ from docx import Document
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 
+from . import placeholders
+
 WPS_NS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
 WPG_NS = "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
 WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
@@ -26,7 +28,13 @@ A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 EMU_PER_PX = 9525
 
-PLACEHOLDER_RE = re.compile(r"\{\{(.*?)\}\}")
+# 占位符正则统一到 utils/placeholders.py（与 utils/filler.py 共用同一份）：
+# 捕获组 + 不跨花括号 + 自动吃掉标签两侧空白。
+# 旧实现 r"\{\{(.*?)\}\}" 无捕获组、可跨花括号，对 {{ 姓名 }} 与 {{a{{b}} 的
+# 解析结果与 filler 不一致 —— 同一模板在两条链路上认出的占位符数量/标签不同。
+# 本模块的用法（找盒子里的占位符文本、判分区标题）都不依赖「跨花括号」这一特性，
+# 换成统一正则不会退化；标签归一也统一走 placeholders.resolve_label()。
+PLACEHOLDER_RE = placeholders.PLACEHOLDER_RE
 # 表格型模板的分区标题（模块头），属于设计而非内容
 SECTION_TITLE_RE = re.compile(
     r"^(个人信息|基本信息|教育(背景)?|工作(经验|经历|背景)?|实习(经验|经历)?|"
