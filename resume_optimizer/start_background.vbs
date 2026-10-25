@@ -1,4 +1,4 @@
-' Silent background launcher for the resume optimizer.
+﻿' Silent background launcher for the resume optimizer.
 ' Starts uvicorn (IPv4 + IPv6) in HIDDEN windows, logs appended under logs\.
 '
 ' IMPORTANT -- the interpreter path below is ABSOLUTE on purpose.
@@ -32,5 +32,7 @@ End If
 logsDir = dirPath & "\logs"
 If Not fso.FolderExists(logsDir) Then fso.CreateFolder(logsDir)
 
-sh.Run "cmd /c """ & py & """ -m uvicorn main:app --host 0.0.0.0 --port 8000 >> logs\server_ipv4.log 2>&1", 0, False
-sh.Run "cmd /c """ & py & """ -m uvicorn main:app --host ::1 --port 8000 >> logs\server_ipv6.log 2>&1", 0, False
+' 单进程启动：--host 0.0.0.0 已覆盖 IPv4 与 IPv6，无需再起第二个进程。
+' 此前同时监听 0.0.0.0:8000 与 [::1]:8000 会起两个独立 uvicorn 进程，
+' 而 token/session 只存在进程内存里 —— IPv4 侧登录、IPv6 侧刷新就会 401。
+sh.Run "cmd /c """ & py & """ -m uvicorn main:app --host 0.0.0.0 --port 8000 >> logs\server.log 2>&1", 0, False
