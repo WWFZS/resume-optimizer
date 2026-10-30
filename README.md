@@ -4,9 +4,9 @@
 
 基于 FastAPI + LLM 构建，核心设计是**把「简历内容」和「版式模板」彻底拆开**——求职者只负责把真实经历填对，AI 负责把表达打磨到位，系统负责排版和导出。换模板不丢内容，改配色不影响结构。
 
-![首页](docs/home.png)
+<p align="center"><img src="docs/home.png" width="520" alt="智简历首页"></p>
 
-![三栏编辑器](docs/editor.png)
+<p align="center"><img src="docs/editor.png" width="520" alt="三栏编辑器"></p>
 
 ---
 
