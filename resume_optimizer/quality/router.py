@@ -6,7 +6,9 @@ Phase 2：ATS 文本层校验（免费）：PDF/Word 导出文件字节流上传
 """
 import json
 
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter, File, Form, Request, UploadFile
+
+from utils import ratelimit
 
 from .ats_check import ats_check
 from .match_score import match_score
@@ -16,16 +18,19 @@ router = APIRouter()
 
 
 @router.post("/api/quality/match-score")
-def api_match_score(req: MatchScoreRequest):
+def api_match_score(req: MatchScoreRequest, request: Request):
     """匹配度评分：输入结构化档案 + 目标岗位/JD，返回综合分与四维分。
 
-    免费功能，无需登录（档案由前端编辑器自己传入）。
+    免费功能，无需登录（档案由前端编辑器自己传入）。内部会调用 GLM，
+    因此按 IP 限流，防止匿名刷额度。
     """
+    ratelimit.check(request, "quality_match", "", limit=10, window=3600)
     return match_score(req.profile, req.target_job, req.jd)
 
 
 @router.post("/api/quality/ats-check")
 async def api_ats_check(
+    request: Request,
     file: UploadFile = File(...),
     jd: str = Form(""),
     target_job: str = Form(""),
@@ -38,6 +43,7 @@ async def api_ats_check(
     - jd / target_job: 可选，用于关键词覆盖率
     - profile: 可选 JSON 字符串，用于强校验联系方式是否以字面文本出现
     """
+    ratelimit.check(request, "quality_ats", "", limit=30, window=3600)
     data = await file.read()
     filename = (file.filename or "").lower()
     fmt = "pdf" if filename.endswith(".pdf") else ("docx" if filename.endswith((".docx", ".doc")) else "")

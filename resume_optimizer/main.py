@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from utils import (applog, auth as user_auth, converter, db, editor, filler, llm,
-                   parser, standard_keys, template)
+                   parser, ratelimit, standard_keys, template)
 from utils.tmpfiles import safe_unlink
 
 load_dotenv()
@@ -308,6 +308,11 @@ async def lifespan(app: FastAPI):
     try:
         db.init_db()
         applog.log("server_start", pid=os.getpid())
+        # 上线前必须改掉默认管理员密码（这里只告警，不阻断启动）
+        if not ADMIN_PASSWORD or ADMIN_PASSWORD in ("admin123456", "admin"):
+            applog.log("weak_admin_password", level="WARN",
+                       hint="ADMIN_PASSWORD 仍是默认值，部署到公网前请修改 .env")
+            print("[WARN] ADMIN_PASSWORD 仍是默认值，部署到公网前请修改 .env")
     except Exception as exc:  # noqa: BLE001
         print(f"[ERROR] 数据库初始化失败（请检查 .env 数据库配置）: {exc}")
         applog.log("server_start_error", error=str(exc))
@@ -427,8 +432,9 @@ def login_page(mode: str = "", next: str = ""):
 
 
 @app.post("/api/register")
-def register(payload: _RegisterIn):
+def register(payload: _RegisterIn, request: Request):
     """用户注册（手机号/邮箱 + 昵称 + 密码），成功后直接登录。"""
+    ratelimit.check(request, "register", f"{ratelimit.client_ip(request)}", limit=10, window=3600)
     account = (payload.account or "").strip().lower()
     password = payload.password or ""
     nickname = (payload.nickname or "").strip()[:30]
@@ -449,10 +455,13 @@ def register(payload: _RegisterIn):
 
 
 @app.post("/api/login")
-def login(payload: _LoginIn):
+def login(payload: _LoginIn, request: Request):
     """账号密码登录，返回令牌与用户信息。"""
     account = (payload.account or "").strip().lower()
     password = payload.password or ""
+    # 防暴力破解：单账号 10 次/5 分钟，单 IP 50 次/5 分钟（覆盖撞库扫号）
+    ratelimit.check(request, "login_acct", account, limit=10, window=300)
+    ratelimit.check(request, "login_ip", "", limit=50, window=300)
     user = db.get_user_by_account(account)
     if user is None or not user_auth.verify_password(password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="账号或密码错误")
@@ -2435,7 +2444,8 @@ def render_resume(template_id: int = Form(...), content: str = Form("{}"),
 
 
 @app.post("/api/optimize-experience-self")
-def optimize_experience_self_api(jd: str = Form(""),
+def optimize_experience_self_api(request: Request,
+                                 jd: str = Form(""),
                                  experience: str = Form(""),
                                  self_evaluate: str = Form(""),
                                  extra: str = Form(""),
@@ -2443,6 +2453,7 @@ def optimize_experience_self_api(jd: str = Form(""),
                                  _: dict = Depends(_require_user)):
     """「简历经历 + 自我评价」优化（智谱 GLM-4-Flash 驱动，mode 仅兼容旧前端、忽略）。
     仅优化经历与自我评价，其余内容分毫不动。"""
+    ratelimit.check(request, "ai_exp_self", f"u{_.get('id')}", limit=20, window=3600)
     if not (jd or "").strip():
         raise HTTPException(status_code=400, detail="请粘贴完整招聘 JD（岗位职责 + 任职要求）")
     if not (experience or "").strip():
@@ -2458,9 +2469,10 @@ def optimize_experience_self_api(jd: str = Form(""),
 
 
 @app.post("/api/ai/optimize-section")
-def ai_optimize_section_api(data: dict = None, _: dict = Depends(_require_user)):
+def ai_optimize_section_api(request: Request, data: dict = None, _: dict = Depends(_require_user)):
     """编辑器内单模块 AI 优化（智谱 GLM-4-Flash）：
     section ∈ internship/work/project/campus/self，返回与输入行结构一致的优化文本。"""
+    ratelimit.check(request, "ai_section", f"u{_.get('id')}", limit=40, window=3600)
     data = data or {}
     section = str(data.get("section") or "")
     content = str(data.get("content") or "")
@@ -2482,8 +2494,9 @@ def ai_optimize_section_api(data: dict = None, _: dict = Depends(_require_user))
 
 
 @app.post("/api/ai-generate-resume")
-def ai_generate_resume(data: dict = None, _: dict = Depends(_require_user)):
+def ai_generate_resume(request: Request, data: dict = None, _: dict = Depends(_require_user)):
     """AI 从零生成整份简历：输入一句话描述 / JD / 目标岗位，返回 basic + modules 结构化内容。"""
+    ratelimit.check(request, "ai_generate", f"u{_.get('id')}", limit=5, window=3600)
     data = data or {}
     description = (data.get("description") or "") if isinstance(data, dict) else ""
     jd = (data.get("jd") or "") if isinstance(data, dict) else ""
@@ -2507,6 +2520,13 @@ app.include_router(quality_router)
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
+    """兜底异常：详情只进日志，回给前端的只有通用文案 + 追踪号（防信息泄露）。"""
+    rid = uuid.uuid4().hex[:8]
+    import traceback
     applog.log("request_error", url=str(request.url), error=str(exc),
-               error_type=type(exc).__name__)
-    return JSONResponse(status_code=500, content={"error": str(exc)})
+               error_type=type(exc).__name__, request_id=rid,
+               trace=traceback.format_exc()[-1500:])
+    return JSONResponse(status_code=500, content={
+        "error": "服务器内部错误，请稍后重试",
+        "request_id": rid,
+    })

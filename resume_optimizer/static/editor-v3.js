@@ -86,7 +86,7 @@
     honor: [{ k: 'time', l: '时间', t: 'period' }, { k: 'name', l: '荣誉 / 证书' }, { k: 'issuer', l: '颁发单位' }]
   };
 
-  var THEMES_ORDER = ['default', 'blue', 'green', 'orange', 'gray', 'wine', 'teal'];
+  var THEMES_ORDER = ['default', 'blue', 'green', 'orange', 'gray', 'slate', 'coral', 'wine', 'teal'];
   var FONTS = ResumeRender.FONTS;
 
   var PRESETS = [
@@ -97,7 +97,22 @@
     { key: 'banner-blue', name: '顶部横幅 · 商务蓝', family: 'headerBar', theme: 'blue' },
     { key: 'sidebar-green', name: '左侧栏 · 清新绿', family: 'sidebar', theme: 'green' },
     { key: 'sidebar-teal', name: '左侧栏 · 青碧', family: 'sidebar', theme: 'teal' },
-    { key: 'twocol-gray', name: '双栏紧凑 · 沉稳灰', family: 'twoCol', theme: 'gray' }
+    { key: 'twocol-gray', name: '双栏紧凑 · 沉稳灰', family: 'twoCol', theme: 'gray' },
+    {
+      key: 'slate-bars', name: '简约灰蓝 · 横条', family: 'headerBar', theme: 'slate',
+      overrides: {
+        sectionStyle: 'solid', pageBg: '#F5F6FB', textColor: '#4F5560', showIcons: false,
+        padding: 48, gap: 18, lineHeight: 1.7, fontSize: 13, photoSize: 104, nameSize: 30
+      }
+    },
+    {
+      key: 'coral-ribbon', name: '简约风 · 左色条', family: 'bannerLeft', theme: 'coral',
+      overrides: {
+        sectionStyle: 'rule', pageBg: '#FFFFFF', textColor: '#414141', showIcons: false,
+        padding: 40, gap: 16, lineHeight: 1.62, fontSize: 12.5,
+        photoSize: 96, photoShape: 'rect', nameSize: 32
+      }
+    }
   ];
   var FAMILIES = ResumeRender.FAMILIES;
 
@@ -116,7 +131,8 @@
   var DEFAULT_THEME = {
     family: 'single', theme: 'default', primary: '#34549B',
     font: 'yahei', fontSize: 13, lineHeight: 1.72, gap: 20, padding: 44,
-    nameSize: 30, photoSize: 92, photoShape: 'rect', sectionStyle: 'underline'
+    nameSize: 30, photoSize: 92, photoShape: 'rect', sectionStyle: 'underline',
+    pageBg: '#FFFFFF', textColor: '#2A2F3A', showIcons: true
   };
 
   /* ───────── 状态 ───────── */
@@ -1302,8 +1318,9 @@
   var FAM_FIGS = {
     single: '<i style="left:8%;top:10%;width:30%;height:22%"></i><i style="left:8%;bottom:12%;width:84%;height:8%"></i><i style="left:8%;bottom:28%;width:70%;height:8%"></i>',
     sidebar: '<i style="left:0;top:0;bottom:0;width:30%"></i><i style="left:38%;top:10%;width:52%;height:12%"></i><i style="left:38%;bottom:12%;width:52%;height:8%"></i>',
-    headerBar: '<i style="left:0;top:0;right:0;height:34%"></i><i style="left:8%;bottom:14%;width:84%;height:8%"></i><i style="left:8%;bottom:30%;width:64%;height:8%"></i>',
-    twoCol: '<i style="left:6%;top:10%;width:38%;height:70%"></i><i style="left:54%;top:10%;width:38%;height:40%"></i>'
+    headerBar: '<i style="left:0;top:0;right:0;height:5%"></i><i style="left:8%;top:12%;width:40%;height:12%"></i><i style="left:8%;top:30%;width:56%;height:5%"></i><i style="left:8%;top:40%;width:56%;height:5%"></i><i style="right:6%;top:10%;width:20%;height:22%"></i>',
+    twoCol: '<i style="left:6%;top:10%;width:38%;height:70%"></i><i style="left:54%;top:10%;width:38%;height:40%"></i>',
+    bannerLeft: '<i style="left:0;top:0;bottom:0;width:6%"></i><i style="left:12%;top:10%;width:40%;height:14%"></i><i style="left:12%;bottom:14%;width:34%;height:6%"></i><i style="left:12%;bottom:26%;width:34%;height:6%"></i><i style="right:0;top:8%;width:22%;height:34%"></i>'
   };
 
   function buildRightPanel() {
@@ -1359,6 +1376,17 @@
     var ss = $('sectionStyle');
     ss.value = S.theme.sectionStyle;
     ss.onchange = function () { S.theme.sectionStyle = ss.value; markDirty(); renderCenter(); };
+
+    /* 纸面 */
+    var pg = $('pageBg');
+    pg.value = /^#[0-9a-fA-F]{6}$/.test(String(S.theme.pageBg)) ? S.theme.pageBg : '#FFFFFF';
+    pg.oninput = function () { S.theme.pageBg = pg.value; markDirty(); applyStyleVars(); };
+    var tc = $('textColor');
+    tc.value = /^#[0-9a-fA-F]{6}$/.test(String(S.theme.textColor)) ? S.theme.textColor : '#2A2F3A';
+    tc.oninput = function () { S.theme.textColor = tc.value; markDirty(); applyStyleVars(); };
+    var si = $('showIcons');
+    si.checked = S.theme.showIcons !== false;
+    si.onchange = function () { S.theme.showIcons = si.checked; markDirty(); renderCenter(); };
 
     /* 头像 */
     var sp = $('showPhoto');
@@ -1554,7 +1582,10 @@
     grid.innerHTML = '';
     var curKey = currentPresetKey();
     PRESETS.forEach(function (p) {
-      var style = mergeTheme(Object.assign({}, S.theme, { family: p.family, theme: p.theme, primary: ResumeRender.THEMES[p.theme].accent }));
+      var style = mergeTheme(Object.assign({}, S.theme, p.overrides || { family: p.family, theme: p.theme }));
+      style.family = p.family;
+      style.theme = p.theme;
+      style.primary = ResumeRender.THEMES[p.theme].accent;
       var card = document.createElement('div');
       card.className = 'v3-tpl-card' + (curKey === p.key ? ' sel' : '');
       card.innerHTML = '<div class="v3-tpl-thumb"></div><div class="v3-tpl-name">' + esc(p.name) + '</div>';
@@ -1564,6 +1595,9 @@
         S.theme.family = p.family;
         S.theme.theme = p.theme;
         S.theme.primary = ResumeRender.THEMES[p.theme].accent;
+        if (p.overrides) {
+          Object.keys(p.overrides).forEach(function (k) { S.theme[k] = p.overrides[k]; });
+        }
         $('tplModal').hidden = true;
         markDirty(); buildRightPanel(); renderCenter();
         toast('已更换模板「' + p.name + '」，内容未丢失');
@@ -1662,6 +1696,275 @@
     return Promise.resolve();
   }
 
+  /* ═════════ AI 生成整份简历 ═════════ */
+
+  var aiGenPending = null, aiGenTimer = null, aiGenStart = 0;
+
+  function aiGenHint(text, isErr) {
+    var el = $('aiGenHint');
+    el.textContent = text || '';
+    el.classList.toggle('is-err', !!isErr);
+  }
+
+  function stopAiGenTimer() {
+    if (aiGenTimer) { clearInterval(aiGenTimer); aiGenTimer = null; }
+  }
+
+  function aiGenStageText(sec) {
+    if (sec < 8) return '正在理解你的经历与目标岗位…';
+    if (sec < 20) return '正在规划简历结构与模块顺序…';
+    if (sec < 40) return '正在撰写教育 / 工作 / 项目经历…';
+    if (sec < 65) return '正在打磨技能与自我评价…';
+    return '内容较多，仍在生成，请再等一会儿…';
+  }
+
+  function openAiGenModal() {
+    var job = $('aiGenJob');
+    if (!job.value) job.value = (S.resume.basic && S.resume.basic.intention) || '';
+    aiGenHint('');
+    $('aiGenProgress').hidden = true;
+    $('aiGenResult').hidden = true;
+    $('aiGenModal').hidden = false;
+  }
+
+  function closeAiGenModal() {
+    stopAiGenTimer();
+    $('aiGenModal').hidden = true;
+  }
+
+  function aiGenSummaryText(d) {
+    var m = d.modules || {};
+    var seg = [];
+    if ((m.education || []).length) seg.push('教育 ' + m.education.length);
+    if ((m.work || []).length) seg.push('工作 ' + m.work.length);
+    if ((m.internship || []).length) seg.push('实习 ' + m.internship.length);
+    if ((m.project || []).length) seg.push('项目 ' + m.project.length);
+    if ((m.skill || []).length) seg.push('技能 ' + m.skill.length);
+    if ((m.honor || []).length) seg.push('荣誉 ' + m.honor.length);
+    if (m.self) seg.push('自我评价 ' + String(m.self).length + ' 字');
+    return seg.join(' · ');
+  }
+
+  function runAiGen() {
+    var desc = ($('aiGenDesc').value || '').trim();
+    var job = ($('aiGenJob').value || '').trim();
+    var jd = ($('aiGenJd').value || '').trim();
+    if (!desc && !job && !jd) { aiGenHint('请至少填写个人情况描述或目标岗位', true); return; }
+
+    var btn = $('aiGenRun');
+    btn.disabled = true;
+    $('aiGenRunTxt').textContent = '生成中…';
+    aiGenHint('');
+    $('aiGenResult').hidden = true;
+    $('aiGenProgress').hidden = false;
+    var bar = $('aiGenProgress').querySelector('i');
+    bar.style.width = '4%';
+    aiGenStart = Date.now();
+    aiGenTimer = setInterval(function () {
+      var sec = Math.floor((Date.now() - aiGenStart) / 1000);
+      $('aiGenStage').textContent = aiGenStageText(sec) + '（已用 ' + sec + ' 秒）';
+      bar.style.width = Math.min(92, 4 + sec * 1.5) + '%';
+    }, 800);
+
+    apiPost('/api/ai-generate-resume', { description: desc, target_job: job, jd: jd })
+      .then(function (d) {
+        aiGenPending = d;
+        $('aiGenSummary').textContent = aiGenSummaryText(d);
+        $('aiGenProgress').hidden = true;
+        $('aiGenResult').hidden = false;
+      })
+      .catch(function (e) { aiGenHint('生成失败：' + e.message, true); $('aiGenProgress').hidden = true; })
+      .then(function () {
+        stopAiGenTimer();
+        btn.disabled = false;
+        $('aiGenRunTxt').textContent = '开始生成';
+      });
+  }
+
+  function applyAiGen() {
+    var d = aiGenPending;
+    if (!d) return;
+    var oldPhoto = (S.resume.basic && S.resume.basic.photo) || '';
+    var next = blankResume();
+    next.basic = Object.assign({}, d.basic || {});
+    if (oldPhoto && !next.basic.photo) next.basic.photo = oldPhoto;   /* 保留已上传照片 */
+    next.modules = Object.assign({}, next.modules, d.modules || {});
+    next.order = (d.order && d.order.length) ? d.order : next.order;
+    next.hidden = [];
+    S.resume = next;
+
+    markDirty();
+    buildLeftPanel();
+    buildRightPanel();
+    renderCenter();
+    closeAiGenModal();
+    aiGenPending = null;
+    toast('已套用 AI 生成内容，可继续修改');
+  }
+
+  function bindAiGenModal() {
+    $('aiGenBtn').onclick = openAiGenModal;
+    $('aiGenClose').onclick = closeAiGenModal;
+    $('aiGenModal').addEventListener('click', function (e) {
+      if (e.target === $('aiGenModal')) closeAiGenModal();
+    });
+    $('aiGenRun').onclick = runAiGen;
+    $('aiGenApply').onclick = applyAiGen;
+    $('aiGenCancel').onclick = closeAiGenModal;
+  }
+
+  /* ═════════ 诊断：岗位匹配度 + ATS 体检 ═════════ */
+
+  var DIAG_DIMS = [
+    { key: 'technical', label: '专业技能' },
+    { key: 'experience', label: '经验匹配' },
+    { key: 'behavioral', label: '行为素质' },
+    { key: 'career', label: '职业发展' }
+  ];
+
+  function diagProfile() {
+    var p = JSON.parse(JSON.stringify(S.resume));
+    if (p.basic) delete p.basic.photo;   /* 照片不参与语义评分，避免请求体过大 */
+    return p;
+  }
+
+  function diagHint(text, isErr) {
+    var el = $('diagHint');
+    el.textContent = text || '';
+    el.classList.toggle('is-err', !!isErr);
+  }
+
+  function diagScoreClass(v) {
+    return v >= 75 ? 'is-good' : v >= 60 ? 'is-ok' : v >= 45 ? 'is-mid' : 'is-low';
+  }
+
+  function openDiagModal() {
+    var job = $('diagJob');
+    if (!job.value) job.value = (S.resume.basic && S.resume.basic.intention) || '';
+    var jd = $('diagJd');
+    if (!jd.value && $('aiJdInput') && $('aiJdInput').value) jd.value = $('aiJdInput').value;
+    diagHint('');
+    $('diagModal').hidden = false;
+  }
+
+  function closeDiagModal() { $('diagModal').hidden = true; }
+
+  function renderDiagMatch(d) {
+    var score = Math.max(0, Math.min(100, Number(d.total_score || 0)));
+    var el = $('diagScore');
+    el.textContent = score;
+    el.className = 'v3-diag-score ' + diagScoreClass(score);
+    $('diagVerdict').textContent = d.verdict_text || '';
+    $('diagNote').textContent = d.note || (d.method === 'glm' ? 'GLM 语义评分' : '基于关键词估算');
+
+    var dims = d.dimensions || {};
+    $('diagDims').innerHTML = DIAG_DIMS.map(function (x) {
+      var v = Math.max(0, Math.min(100, Number(dims[x.key] || 0)));
+      return '<div class="v3-diag-dim"><span>' + esc(x.label) + '</span>'
+        + '<div class="v3-diag-bar"><i class="' + diagScoreClass(v) + '" style="width:' + v + '%"></i></div>'
+        + '<b>' + v + '</b></div>';
+    }).join('');
+
+    function chips(list, cls) {
+      var arr = list || [];
+      if (!arr.length) return '<span class="v3-diag-empty">—</span>';
+      return arr.slice(0, 24).map(function (k) {
+        return '<span class="v3-chip ' + cls + '">' + esc(k) + '</span>';
+      }).join('');
+    }
+    $('diagMatched').innerHTML = chips(d.matched_keywords, 'is-good');
+    $('diagMissing').innerHTML = chips(d.missing_keywords, 'is-miss');
+
+    var gaps = d.gaps || [];
+    $('diagGaps').innerHTML = gaps.length
+      ? '<div class="v3-diag-gaps-title">建议补齐</div>' + gaps.slice(0, 6).map(function (g) {
+          return '<p>· ' + esc(g) + '</p>';
+        }).join('')
+      : '';
+    $('diagMatchResult').hidden = false;
+  }
+
+  function runDiagMatch() {
+    var jd = ($('diagJd').value || '').trim();
+    var job = ($('diagJob').value || '').trim();
+    if (!jd && !job) { diagHint('请至少填写目标岗位或招聘 JD', true); return; }
+    var btn = $('diagMatchBtn');
+    btn.disabled = true;
+    $('diagMatchBtnTxt').textContent = '分析中…';
+    diagHint('正在分析匹配度（约 20–40 秒）…');
+    apiPost('/api/quality/match-score', { profile: diagProfile(), target_job: job, jd: jd })
+      .then(function (d) { renderDiagMatch(d); diagHint(''); })
+      .catch(function (e) { diagHint('分析失败：' + e.message, true); })
+      .then(function () { btn.disabled = false; $('diagMatchBtnTxt').textContent = '匹配度分析'; });
+  }
+
+  function renderDiagAts(d) {
+    var score = Math.max(0, Math.min(100, Number(d.ats_score || 0)));
+    var el = $('diagAtsScore');
+    el.textContent = score;
+    el.className = 'v3-diag-score ' + diagScoreClass(score);
+    $('diagAtsVerdict').textContent = d.verdict_text || '';
+    var meta = [];
+    if (d.format) meta.push('格式 ' + String(d.format).toUpperCase());
+    if (d.text_length) meta.push('文本 ' + d.text_length + ' 字符');
+    $('diagAtsNote').textContent = meta.join(' · ');
+
+    var checks = d.checks || [];
+    $('diagAtsChecks').innerHTML = checks.map(function (c) {
+      var st = c.status === 'pass' ? 'is-good' : (c.status === 'warn' ? 'is-mid' : 'is-low');
+      var icon = c.status === 'pass' ? '✓' : (c.status === 'warn' ? '!' : '×');
+      return '<div class="v3-diag-check ' + st + '"><b>' + icon + '</b><div><span>' + esc(c.name || '') + '</span>'
+        + (c.detail ? '<p>' + esc(c.detail) + '</p>' : '') + '</div></div>';
+    }).join('');
+    $('diagAtsResult').hidden = false;
+  }
+
+  function runDiagAts() {
+    var jd = ($('diagJd').value || '').trim();
+    var job = ($('diagJob').value || '').trim();
+    var btn = $('diagAtsBtn');
+    btn.disabled = true;
+    $('diagAtsBtnTxt').textContent = '检测中…';
+    diagHint('正在生成当前简历并做 ATS 解析…');
+    fetch('/api/export/docx', {
+      method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(exportPayload())
+    }).then(function (r) {
+      if (!r.ok) throw new Error('导出失败（HTTP ' + r.status + '）');
+      return r.blob();
+    }).then(function (blob) {
+      var fd = new FormData();
+      fd.append('file', blob, 'resume.docx');
+      fd.append('jd', jd);
+      fd.append('target_job', job);
+      fd.append('profile', JSON.stringify(diagProfile()));
+      return fetch('/api/quality/ats-check', { method: 'POST', headers: authHeaders(), body: fd });
+    }).then(function (r) {
+      return r.json().then(function (d) {
+        if (!r.ok) throw new Error(d.detail || '检测失败');
+        return d;
+      });
+    }).then(function (d) {
+      renderDiagAts(d);
+      diagHint('');
+    }).catch(function (e) {
+      diagHint('检测失败：' + e.message, true);
+    }).then(function () {
+      btn.disabled = false;
+      $('diagAtsBtnTxt').textContent = 'ATS 体检';
+    });
+  }
+
+  function bindDiagModal() {
+    $('diagBtn').onclick = openDiagModal;
+    $('diagClose').onclick = closeDiagModal;
+    $('diagModal').addEventListener('click', function (e) {
+      if (e.target === $('diagModal')) closeDiagModal();
+    });
+    $('diagMatchBtn').onclick = runDiagMatch;
+    $('diagAtsBtn').onclick = runDiagAts;
+  }
+
   /* ═════════ 启动 ═════════ */
 
   function boot() {
@@ -1676,6 +1979,8 @@
         renderCenter();
         bindTopbar();
         bindAiModal();
+        bindAiGenModal();
+        bindDiagModal();
         window.addEventListener('resize', debounce(layoutPaper, 150));
         setSavedTip(S.draftId ? 'is-ok' : '', S.draftId ? '已同步云端' : '自动保存已开启');
       });

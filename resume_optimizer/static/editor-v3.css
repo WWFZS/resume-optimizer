@@ -422,3 +422,71 @@ details.v3-more > summary { font-size: 12px; color: var(--v3-accent); cursor: po
   .v3-tb-back-txt { display: none; }
   .v3-logo-name { display: none; }
 }
+
+/* ═════════ 简历诊断弹窗：匹配度 + ATS ═════════ */
+.v3-diag-modal { width: 680px; }
+.v3-diag-fields { display: grid; grid-template-columns: 210px 1fr; gap: 12px; }
+.v3-diag-result { margin-top: 14px; border-top: 1px dashed var(--v3-line); padding-top: 14px; }
+.v3-diag-result[hidden] { display: none; }
+.v3-diag-scoreline { display: flex; align-items: center; gap: 14px; }
+.v3-diag-score {
+  width: 68px; height: 68px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  font-size: 26px; font-weight: 800; letter-spacing: -.5px; flex: none;
+  background: #F1F4FA; color: var(--v3-accent); border: 3px solid #DCE4F3;
+}
+.v3-diag-score.is-good { color: #1FA67A; border-color: #BFE7D9; background: #F2FBF7; }
+.v3-diag-score.is-ok { color: #34549B; border-color: #CBDAF4; background: #F3F6FD; }
+.v3-diag-score.is-mid { color: #B8860B; border-color: #F2E2B8; background: #FDF9EE; }
+.v3-diag-score.is-low { color: #D6455D; border-color: #F4CBD2; background: #FDF3F5; }
+.v3-diag-verdict { font-size: 15px; font-weight: 700; color: var(--v3-ink); }
+.v3-diag-note { font-size: 12px; color: var(--v3-ink-3); margin-top: 3px; }
+.v3-diag-dims { margin-top: 14px; display: grid; gap: 8px; }
+.v3-diag-dim { display: grid; grid-template-columns: 72px 1fr 34px; align-items: center; gap: 10px; font-size: 12px; color: var(--v3-ink-2); }
+.v3-diag-dim b { text-align: right; font-size: 12.5px; color: var(--v3-ink); }
+.v3-diag-bar { height: 7px; border-radius: 999px; background: #EEF1F6; overflow: hidden; }
+.v3-diag-bar i { display: block; height: 100%; border-radius: 999px; background: #34549B; transition: width .35s ease; }
+.v3-diag-bar i.is-good { background: #1FA67A; }
+.v3-diag-bar i.is-ok { background: #34549B; }
+.v3-diag-bar i.is-mid { background: #D9A62B; }
+.v3-diag-bar i.is-low { background: #D6455D; }
+.v3-diag-kw { margin-top: 14px; display: grid; gap: 8px; }
+.v3-diag-kw-row { display: grid; grid-template-columns: 40px 1fr; gap: 10px; align-items: start; }
+.v3-diag-kw-label { font-size: 12px; color: var(--v3-ink-3); padding-top: 3px; }
+.v3-diag-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.v3-chip { font-size: 11.5px; padding: 2px 9px; border-radius: 999px; background: #F1F4FA; color: var(--v3-ink-2); }
+.v3-chip.is-good { background: #EBF8F2; color: #15805D; }
+.v3-chip.is-miss { background: #FDF1F3; color: #B5405A; }
+.v3-diag-empty { font-size: 12px; color: var(--v3-ink-3); }
+.v3-diag-gaps { margin-top: 12px; font-size: 12.5px; color: var(--v3-ink-2); }
+.v3-diag-gaps-title { font-weight: 700; margin-bottom: 4px; color: var(--v3-ink); }
+.v3-diag-gaps p { margin: 2px 0; }
+.v3-diag-checks { margin-top: 12px; display: grid; gap: 8px; }
+.v3-diag-check { display: grid; grid-template-columns: 20px 1fr; gap: 8px; font-size: 12.5px; }
+.v3-diag-check b {
+  width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: #fff; background: #1FA67A; margin-top: 1px;
+}
+.v3-diag-check.is-mid b { background: #D9A62B; }
+.v3-diag-check.is-low b { background: #D6455D; }
+.v3-diag-check p { margin: 2px 0 0; color: var(--v3-ink-3); font-size: 12px; }
+.v3-ai-hint.is-err { color: var(--v3-danger); }
+@media (max-width: 720px) {
+  .v3-diag-fields { grid-template-columns: 1fr; }
+  .v3-diag-modal { width: 96vw; }
+}
+
+/* ═════════ AI 生成整份简历 ═════════ */
+.v3-aigen-modal { width: 620px; }
+.v3-aigen-progress { margin-top: 12px; }
+.v3-aigen-progress[hidden] { display: none; }
+.v3-aigen-bar { height: 8px; border-radius: 999px; background: #EEF1F6; overflow: hidden; }
+.v3-aigen-bar i {
+  display: block; height: 100%; width: 4%; border-radius: 999px;
+  background: linear-gradient(90deg, #34549B, #6C7FD8);
+  transition: width .6s ease;
+}
+.v3-aigen-progress p { margin: 8px 0 0; font-size: 12.5px; color: var(--v3-ink-3); }
+.v3-aigen-warn {
+  margin: 8px 0 0; font-size: 12px; color: #B8860B;
+  background: #FDF9EE; border: 1px solid #F2E2B8; border-radius: 8px; padding: 7px 10px;
+}

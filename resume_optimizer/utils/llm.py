@@ -640,11 +640,10 @@ def trim_content(
     return result
 
 
-def optimize_section(kind: str, text: str, job_description: str = "") -> str:
-    """AI 优化单个板块（编辑器用）。
-    kind: work（工作/实习经历）| campus（校园经历）| self（自我评价）。
-    - work/campus：第一行（时间+公司/组织+岗位）逐字保留，只优化描述行；
-    - self：基于原文重构表达，贴合 JD，不编造。
+def _legacy_optimize_section_impl(kind: str, text: str, job_description: str = "") -> str:
+    """【已废弃】旧版单板块优化实现（kind/text 签名），仅存档不参与运行时。
+
+    现行实现见下方 optimize_section(section, content, jd, extra)。
     """
     kind = (kind or "work").strip().lower()
     text = (text or "").strip()
@@ -845,12 +844,24 @@ def optimize_section(section: str, content: str, jd: str = "", extra: str = "") 
 _SEC_NUM_MARK_RE = re.compile(r"^(\s*(?:[0-9]{1,2}[.、．）)]|[①-⑳])\s*)")
 _SEC_BULLET_RE = re.compile(r"^\s*[-•·▪*]\s+")
 
+# 模型偶发整行加书名号/引号包裹，直接套用会带进简历正文
+_WRAP_PAIRS = (("「", "」"), ("『", "』"), ("“", "”"), ("‘", "’"), ('"', '"'), ("'", "'"))
+
+
+def _strip_wrap_quotes(s: str) -> str:
+    s = s.strip()
+    for left, right in _WRAP_PAIRS:
+        if len(s) >= 2 and s.startswith(left) and s.endswith(right):
+            return s[1:-1].strip()
+    return s
+
 
 def _clean_section_output(text: str) -> str:
-    """清洗单模块优化输出：去掉「编号 + 短横线」双重前缀，保证可直接套用预设格式。
+    """清洗单模块优化输出：去包裹引号、去「编号 + 短横线」双重前缀，保证可直接套用。
 
     - 「1. - xxx」「1、- xxx」「①- xxx」→「1. xxx」
     - 「- 1. xxx」→「1. xxx」
+    - 「xxx」→ xxx（整行被引号/书名号包裹时）
     - 纯项目符号行（无编号）保持原样，交由前端预设统一。
     """
     if not text:
@@ -861,6 +872,7 @@ def _clean_section_output(text: str) -> str:
         if not stripped.strip():
             out.append(stripped)
             continue
+        stripped = _strip_wrap_quotes(stripped)
         # 情况二：项目符号在前、编号在后 → 去掉前导符号
         m_bul = _SEC_BULLET_RE.match(stripped)
         if m_bul and _SEC_NUM_MARK_RE.match(stripped[m_bul.end():]):
@@ -970,23 +982,49 @@ def generate_full_resume(description: str, jd: str = "", target_job: str = "") -
 
 
 def _normalize_generated_resume(obj: dict) -> dict:
-    """把模型输出规范化为编辑器可用的结构，补缺字段、修正类型。"""
+    """把模型输出规范化为 v3 编辑器可用的结构（短键 + order/hidden）。
+
+    模型习惯输出旧版长键（education_info/work_history/skill_info…），
+    而 v3 编辑器的 modules 用短键（education/work/skill…）。这里统一转成短键，
+    并把 basic.intention_job 对齐为 basic.intention，否则前端套用后整份内容不显示。
+    """
     basic = obj.get("basic") or {}
     if not isinstance(basic, dict):
         basic = {}
     modules = obj.get("modules") or {}
     if not isinstance(modules, dict):
         modules = {}
-    arr_keys = ["education_info", "work_history", "internship_info", "projects",
-                "campus_exp", "skill_info", "honor_cert", "hobby"]
-    for k in arr_keys:
-        v = modules.get(k)
-        modules[k] = v if isinstance(v, list) else []
-    for rec in modules.get("work_history", []) + modules.get("internship_info", []):
+
+    # 长键 → 短键（同时兼容模型已经输出短键的情况）
+    key_map = {
+        "education_info": "education", "work_history": "work",
+        "internship_info": "internship", "projects": "project",
+        "campus_exp": "campus", "skill_info": "skill",
+        "honor_cert": "honor", "self_evaluate": "self",
+        "hobby": "hobby", "custom": "custom",
+    }
+    short = {}
+    for long_key, sk in key_map.items():
+        if modules.get(sk) not in (None, "", [], {}):
+            short[sk] = modules.get(sk)
+        elif modules.get(long_key) not in (None, "", [], {}):
+            short[sk] = modules.get(long_key)
+
+    list_keys = ["education", "work", "internship", "project",
+                 "campus", "skill", "honor", "hobby"]
+    for k in list_keys:
+        short[k] = short.get(k) if isinstance(short.get(k), list) else []
+    for rec in short.get("work", []) + short.get("internship", []):
         if isinstance(rec, dict) and not isinstance(rec.get("current"), bool):
             rec["current"] = bool(rec.get("current"))
-    if not isinstance(modules.get("self_evaluate"), str):
-        modules["self_evaluate"] = "" if modules.get("self_evaluate") is None else str(modules.get("self_evaluate"))
-    if not isinstance(modules.get("custom"), str):
-        modules["custom"] = ""
-    return {"basic": basic, "modules": modules}
+    for k in ("self", "custom"):
+        v = short.get(k)
+        short[k] = v if isinstance(v, str) else ("" if v is None else str(v))
+
+    # basic 字段对齐：intention_job → intention（v3 渲染读 intention）
+    if not basic.get("intention") and basic.get("intention_job"):
+        basic["intention"] = basic.get("intention_job")
+
+    order = ["education", "internship", "work", "project", "campus", "skill", "honor", "self", "hobby"]
+    order = [k for k in order if short.get(k) not in ("", [], {}, None)]
+    return {"basic": basic, "modules": short, "order": order, "hidden": []}

@@ -51,3 +51,13 @@ _rea_tukuppt/
 
 # 模板迁移备份（本地留存，不入库）
 _migrate_backup/
+
+# 个人简历原件（严禁入库：含本人真实姓名/联系方式/工作经历）
+resume_optimizer/utils/templates/tpl_new20.docx
+resume_optimizer/utils/templates/1b6fdb1955f147a5928f98bd9775077a.docx
+# 真实用户上传与数据库导出（严禁入库）
+uploads/
+resume_optimizer/uploads/
+*.sql
+*.sqlite
+*.sqlite3

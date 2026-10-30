@@ -1,13 +1,9 @@
 """将编辑器结构化档案（basic + modules）桥接为匹配评分可用的文本与关键词。
 
-profile 数据结构（与 utils/llm.generate_full_resume 产出一致）：
-{
-  "basic": {"name","gender","age","phone","email","city","education_degree",
-            "school","major","intention_job","political_status", ...},
-  "modules": {"education_info":[...], "work_history":[...], "internship_info":[...],
-              "projects":[...], "campus_exp":[...], "skill_info":[...],
-              "honor_cert":[...], "self_evaluate":"", "hobby":[...], "custom":""}
-}
+**同时兼容两套键名**：
+- v3 编辑器（当前）：basic.intention + modules.education / work / skill / self …
+- 旧版 / LLM 直出：basic.intention_job + modules.education_info / work_history / skill_info …
+两套都会被识别，避免「档案读出空文本 → 匹配度恒 0 分」。
 """
 import re
 from typing import Any, Dict, List, Set
@@ -22,19 +18,52 @@ _STOPWORDS = set(
 )
 
 
+# 基础字段：同一含义的新旧键名（v3 短键在前，旧长键在后）
+_BASIC_KEY_GROUPS = (
+    ("name",),
+    ("intention", "intention_job", "job_title", "target_job"),
+    ("city",),
+    ("education_degree", "degree"),
+    ("school",),
+    ("major",),
+    ("political_status",),
+    ("phone", "mobile"),
+    ("email",),
+    ("wechat",),
+    ("address",),
+    ("gender",),
+    ("age",),
+)
+
+# 模块字段：v3 短键 / 旧长键
+_MODULE_KEY_GROUPS = (
+    ("education", "education_info"),
+    ("work", "work_history"),
+    ("internship", "internship_info"),
+    ("project", "projects"),
+    ("campus", "campus_exp"),
+    ("skill", "skill_info"),
+    ("honor", "honor_cert"),
+    ("self", "self_evaluate"),
+    ("hobby", "hobby"),
+    ("custom", "custom"),
+)
+
+
 def flatten_profile_text(profile: Dict[str, Any]) -> str:
-    """把结构化档案拍平为纯文本，供 GLM 与关键词提取使用。"""
+    """把结构化档案拍平为纯文本，供 GLM 与关键词提取使用（兼容新旧键名）。"""
     if not isinstance(profile, dict):
         return ""
     basic = profile.get("basic") or {}
     modules = profile.get("modules") or {}
     parts: List[str] = []
 
-    for k in ("name", "intention_job", "job_title", "city", "education_degree",
-              "school", "major", "political_status"):
-        v = basic.get(k)
-        if v:
-            parts.append(str(v))
+    for keys in _BASIC_KEY_GROUPS:
+        for k in keys:
+            v = basic.get(k)
+            if v:
+                parts.append(str(v))
+                break
 
     def _join(items: Any) -> List[str]:
         out: List[str] = []
@@ -48,12 +77,12 @@ def flatten_profile_text(profile: Dict[str, Any]) -> str:
             out.append(items)
         return out
 
-    for key in ("education_info", "work_history", "internship_info", "projects",
-                "campus_exp", "skill_info", "honor_cert", "self_evaluate",
-                "hobby", "custom"):
-        vals = _join(modules.get(key))
-        if vals:
-            parts.extend(vals)
+    for keys in _MODULE_KEY_GROUPS:
+        for key in keys:
+            vals = _join(modules.get(key))
+            if vals:
+                parts.extend(vals)
+                break
     return "\n".join(parts)
 
 

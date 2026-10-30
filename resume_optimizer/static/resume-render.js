@@ -22,7 +22,8 @@
   var FAMILIES = {
     single:    { name: '单栏经典', hint: '自上而下单列，最通用稳妥' },
     sidebar:   { name: '左侧栏',   hint: '左栏放联系与技能，右侧主内容' },
-    headerBar: { name: '顶部横幅', hint: '顶部色带突出姓名与求职意向' },
+    headerBar: { name: '顶部横幅', hint: '页顶主色细带做标识，白底大号姓名 + 两列信息 + 右上照片' },
+    bannerLeft:{ name: '左色条', hint: '左侧主色竖条 + 大号姓名（无底色），右侧两列信息 + 右上照片' },
     twoCol:    { name: '双栏紧凑', hint: '正文分两栏，适合经历较多' }
   };
 
@@ -34,6 +35,8 @@
     green:   { name: '清新绿',   accent: '#1FA67A', deep: '#12775A', soft: '#E7F7F1' },
     orange:  { name: '活力橙',   accent: '#E2691A', deep: '#A84A0F', soft: '#FDF0E6' },
     gray:    { name: '沉稳灰',   accent: '#4B5563', deep: '#1F2937', soft: '#F0F2F5' },
+    slate:   { name: '雾蓝',     accent: '#607A9D', deep: '#45607F', soft: '#EDF1F6' },
+    coral:   { name: '珊瑚红',   accent: '#F75A53', deep: '#B1403B', soft: '#FEEBEA' },
     wine:    { name: '酒红',     accent: '#A03A52', deep: '#6E2338', soft: '#FBEAF0' },
     teal:    { name: '青碧',     accent: '#0F766E', deep: '#0B5049', soft: '#E4F5F2' }
   };
@@ -75,7 +78,10 @@
     photoSize: 92,
     photoShape: 'rect',
     sectionStyle: 'underline',
-    fontScale: 1
+    fontScale: 1,
+    pageBg: '#FFFFFF',
+    textColor: '#2A2F3A',
+    showIcons: true
   };
 
   /* 联系方式字段（进头部一行）与网格字段 */
@@ -223,6 +229,25 @@
     return parts.length ? '<div class="rr-contact">' + parts.join('') + '</div>' : '';
   }
 
+  /* 左色条族：头部两列联系信息（带小菱形点，对齐原生模板） */
+  var BL_GRID_KEYS = ['birth_date', 'nation', 'hometown', 'political_status',
+    'marriage', 'education_degree', 'gender', 'age',
+    'phone', 'email', 'wechat', 'city', 'school', 'major'];
+
+  function contactGridHtml(data) {
+    var b = data.basic || {};
+    var fv = data.fieldVisible || {};
+    var cells = [];
+    for (var i = 0; i < BL_GRID_KEYS.length; i++) {
+      var k = BL_GRID_KEYS[i];
+      if (fv[k] === false || !hasText(b[k])) continue;
+      var label = CONTACT_LABEL[k] || FIELD_LABEL[k] || '';
+      cells.push('<div class="rr-bl-cell"><i class="rr-bl-dot"></i>' +
+        '<b>' + esc(label) + '：</b>' + esc(b[k]) + '</div>');
+    }
+    return cells.length ? '<div class="rr-bl-grid">' + cells.join('') + '</div>' : '';
+  }
+
   function basicGridHtml(data) {
     var b = data.basic || {};
     var fv = data.fieldVisible || {};
@@ -241,8 +266,9 @@
   function sectionTitleHtml(sec, style) {
     var styleCls = style.sectionStyle && style.sectionStyle !== 'underline'
       ? ' is-' + style.sectionStyle : '';
+    var icon = (style.showIcons === false) ? '' : sec.icon;
     return '<div class="rr-sec-title' + styleCls + '">' +
-      (sec.icon ? '<span class="rr-sec-ico">' + sec.icon + '</span>' : '') +
+      (icon ? '<span class="rr-sec-ico">' + icon + '</span>' : '') +
       '<span>' + esc(sec.label) + '</span></div>';
   }
 
@@ -282,7 +308,7 @@
 
   /* ══════════ 各族 DOM 组装 ══════════ */
 
-  function renderHead(data, style) {
+  function renderHead(data, style, gridHtml) {
     var b = data.basic || {};
     var intention = buildIntention(data);
     return '<div class="rr-head">' +
@@ -290,6 +316,7 @@
         '<div class="rr-name">' + esc(b.name || '姓名') + '</div>' +
         (intention ? '<div class="rr-intent">求职意向：' + esc(intention) + '</div>' : '') +
         contactHtml(data) +
+        (gridHtml || '') +
       '</div>' +
       photoHtml(data, style) +
     '</div>';
@@ -335,34 +362,54 @@
       '</div>';
     }
 
-    if (fam === 'headerBar') {
-      var b2 = data.basic || {};
-      return '<div class="rr-page fam-headerBar">' +
-        '<div class="rr-banner">' +
-          '<div class="rr-head-main">' +
-            '<div class="rr-name">' + esc(b2.name || '姓名') + '</div>' +
-            (buildIntention(data) ? '<div class="rr-intent">' + esc(buildIntention(data)) + '</div>' : '') +
-            contactHtml(data) +
+    if (fam === 'bannerLeft') {
+      /* 左色条：姓名不加底色，左侧一条主色竖条做装饰；
+         姓名/意向在上、两列信息在下，右上照片，头部下接通栏细线 */
+      var b3 = data.basic || {};
+      return '<div class="rr-page fam-bannerLeft">' +
+        '<div class="rr-bl-head">' +
+          '<div class="rr-bl-bar"></div>' +
+          '<div class="rr-bl-main">' +
+            '<div class="rr-bl-top">' +
+              '<div class="rr-name">' + esc(b3.name || '姓名') + '</div>' +
+              (buildIntention(data) ? '<div class="rr-intent">' + esc(buildIntention(data)) + '</div>' : '') +
+            '</div>' +
+            contactGridHtml(data) +
           '</div>' +
           photoHtml(data, style) +
         '</div>' +
-        basicGridHtml(data) +
+        '<div class="rr-bl-hair"></div>' +
+        body +
+      '</div>';
+    }
+
+    if (fam === 'headerBar') {
+      /* 顶部横幅（细顶带版）：页顶一条主色通栏色带做标识，姓名不压深色底；
+         白色头部放大号姓名/意向/联系方式 + 右侧照片，信息网格并入头部撑高文字区 */
+      var g4 = basicGridHtml(data);
+      return '<div class="rr-page fam-headerBar">' +
+        '<div class="rr-hb-bar"></div>' +
+        '<div class="rr-hb-top">' + renderHead(data, style, g4) + '</div>' +
         body +
       '</div>';
     }
 
     if (fam === 'twoCol') {
+      var g2 = basicGridHtml(data);
+      var gridInHead2 = data.showPhoto !== false;   /* 有照片时网格并入头部，撑高文字区 */
       return '<div class="rr-page fam-twoCol">' +
-        renderHead(data, style) +
-        (basicGridHtml(data) ? '<section class="rr-sec">' + basicGridHtml(data) + '</section>' : '') +
+        renderHead(data, style, gridInHead2 ? g2 : '') +
+        (!gridInHead2 && g2 ? '<section class="rr-sec">' + g2 + '</section>' : '') +
         '<div class="rr-cols">' + body + '</div>' +
       '</div>';
     }
 
     /* single */
+    var g1 = basicGridHtml(data);
+    var gridInHead = data.showPhoto !== false;
     return '<div class="rr-page fam-single">' +
-      renderHead(data, style) +
-      (basicGridHtml(data) ? '<section class="rr-sec">' + basicGridHtml(data) + '</section>' : '') +
+      renderHead(data, style, gridInHead ? g1 : '') +
+      (!gridInHead && g1 ? '<section class="rr-sec">' + g1 + '</section>' : '') +
       body +
     '</div>';
   }
@@ -425,6 +472,8 @@
     el.style.setProperty('--rr-name-size', (s.nameSize * sc).toFixed(1) + 'px');
     el.style.setProperty('--rr-photo-size', s.photoSize + 'px');
     el.style.setProperty('--rr-radius', s.photoShape === 'circle' ? '999px' : '4px');
+    el.style.setProperty('--rr-page-bg', s.pageBg || '#FFFFFF');
+    el.style.setProperty('--rr-text', s.textColor || '#2A2F3A');
   }
 
   /** 渲染 + 应用变量的便捷封装 */

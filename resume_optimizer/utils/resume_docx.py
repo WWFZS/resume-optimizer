@@ -13,8 +13,9 @@ import re
 from typing import List, Optional, Tuple
 
 from docx import Document
-from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
+from docx.document import Document as _DocxDocument
+from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT, WD_TAB_LEADER
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
@@ -48,6 +49,14 @@ EXTRA_FIELD_LABEL = {
     "hometown": "籍贯", "nation": "民族", "political_status": "政治面貌",
     "marriage": "婚姻状况", "education_degree": "学历",
 }
+# 左角色块族（bannerLeft）头部的两列信息顺序：先基本信息、再联系方式、最后院校专业
+BL_GRID_ORDER = [
+    ("birth_date", "出生年月"), ("nation", "民族"), ("hometown", "籍贯"),
+    ("political_status", "政治面貌"), ("marriage", "婚姻状况"),
+    ("education_degree", "学历"), ("gender", "性别"), ("age", "年龄"),
+    ("phone", "电话"), ("email", "邮箱"), ("wechat", "微信"), ("city", "现居"),
+    ("school", "毕业院校"), ("major", "专业"),
+]
 
 DEFAULT_THEME = {
     "primary": "#34549B", "font": "yahei", "fontSize": 13,
@@ -128,6 +137,25 @@ def _para_shading(p, fill: str) -> None:
     ppr.append(shd)
 
 
+def _tbl_cell_margin(tbl, bottom_pt: float = 0.0, top_pt: float = 0.0) -> None:
+    """给（嵌套）表格设置单元格上下内边距（dxa）。
+
+    Word 会忽略单元格末段的 space_before/行距，只有 cell margin 能稳定撑出底部留白。
+    """
+    tblpr = tbl._tbl.tblPr
+    mar = OxmlElement("w:tblCellMar")
+    for side, val in (("top", top_pt), ("left", 0.0), ("bottom", bottom_pt), ("right", 0.0)):
+        m = OxmlElement(f"w:{side}")
+        m.set(qn("w:w"), str(int(round(val * 20))))   # 1pt = 20 dxa
+        m.set(qn("w:type"), "dxa")
+        mar.append(m)
+    look = tblpr.find(qn("w:tblLook"))
+    if look is not None:
+        look.addprevious(mar)
+    else:
+        tblpr.append(mar)
+
+
 def _table_bleed(tbl, total_cm: float, left_margin_cm: float = 1.5,
                  zero_cell_margin: bool = False) -> None:
     """表格左侧负缩进顶到页面左缘，总宽 = 指定宽度（实现横幅/侧栏全幅贴边）。"""
@@ -199,22 +227,68 @@ def _range_text(x: dict) -> str:
     return start or end
 
 
+def _public_http_host(host: str) -> bool:
+    """仅允许公网 host：拒绝 localhost / 内网 / 链路本地 / 保留地址（防 SSRF）。"""
+    import ipaddress
+    import socket
+
+    host = (host or "").strip().lower()
+    if not host or host in ("localhost", "localhost.localdomain"):
+        return False
+    candidates = []
+    try:
+        # 域名解析出的所有地址都必须合法，避免 DNS 重绑定绕过
+        for info in socket.getaddrinfo(host, None):
+            candidates.append(info[4][0])
+    except Exception:  # noqa: BLE001
+        return False
+    if not candidates:
+        return False
+    for raw in candidates:
+        try:
+            ip = ipaddress.ip_address(raw.split("%")[0])
+        except ValueError:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+                or ip.is_reserved or ip.is_unspecified):
+            return False
+    return True
+
+
+MAX_PHOTO_BYTES = 3 * 1024 * 1024
+
+
 def _photo_bytes(photo) -> Optional[bytes]:
-    """dataURL 优先；http(s) 尽力抓取（3 秒超时），失败返回 None。"""
+    """dataURL 优先；http(s) 仅允许公网地址并限 3MB（失败返回 None）。"""
     if not photo:
         return None
     photo = str(photo).strip()
     m = re.match(r"^data:image/(?:png|jpe?g|webp);base64,(.+)$", photo, re.S)
     if m:
         try:
-            return base64.b64decode(m.group(1))
+            data = base64.b64decode(m.group(1))
+            return data if len(data) <= MAX_PHOTO_BYTES else None
         except Exception:  # noqa: BLE001
             return None
     if photo.startswith(("http://", "https://")):
+        from urllib.parse import urlparse
         try:
+            parsed = urlparse(photo)
+            if not _public_http_host(parsed.hostname or ""):
+                return None
             import requests
-            resp = requests.get(photo, timeout=3)
-            return resp.content if resp.ok else None
+            with requests.get(photo, timeout=3, stream=True) as resp:
+                if not resp.ok:
+                    return None
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                if ctype and not ctype.startswith("image/"):
+                    return None
+                buf = bytearray()
+                for chunk in resp.iter_content(64 * 1024):
+                    buf.extend(chunk)
+                    if len(buf) > MAX_PHOTO_BYTES:
+                        return None
+                return bytes(buf) or None
         except Exception:  # noqa: BLE001
             return None
     return None
@@ -248,21 +322,25 @@ def _bullet(p_line, text: str, family: str, size_pt: float, color: str) -> None:
 
 
 class _Target:
-    """统一 doc / table cell 的段落来源（cell 复用首个空段落）。"""
+    """统一 doc / table cell 的段落来源。
+
+    单元格（含文本框）自带一个空段落，首次取段落时复用它，避免内容前多出一个空行；
+    Document 不复用——那里的空段落是调用方特意留的占位（如头部下方的分隔线段），
+    复用会导致后续段落把它吃掉、边框叠加。
+    """
 
     def __init__(self, obj):
         self.obj = obj
         self._first_used = False
 
     def para(self):
-        if hasattr(self.obj, "add_paragraph"):
-            return self.obj.add_paragraph()
-        paras = self.obj.paragraphs
-        if not self._first_used and len(paras) == 1 and not paras[0].runs:
+        paras = getattr(self.obj, "paragraphs", None)
+        if (paras is not None and not self._first_used and len(paras) == 1
+                and not isinstance(self.obj, _DocxDocument)
+                and not paras[0].runs and not paras[0].text.strip()):
             self._first_used = True
             return paras[0]
         return self.obj.add_paragraph()
-
 
 class _Ctx:
     """渲染上下文：颜色 / 字体 / 尺寸 / 数据。"""
@@ -272,8 +350,8 @@ class _Ctx:
         self.primary = _hex_or(theme.get("primary"), DEFAULT_THEME["primary"])
         self.deep = _shade(self.primary, 0.72)
         self.soft = _shade(self.primary, 1.88)
-        self.gray = "595959"
-        self.body_color = "333333"
+        self.body_color = _hex_or(theme.get("textColor"), "333333")
+        self.gray = _shade(self.body_color, 1.34) if self.body_color != "333333" else "595959"
         self.on_dark_text = "FFFFFF"
         self.on_dark_muted = "DDE3EE"
         self.family_font = FONT_NAMES.get(theme.get("font") or "yahei", "微软雅黑")
@@ -281,8 +359,10 @@ class _Ctx:
         self.name_pt = float(theme.get("nameSize") or 30) * PX2PT
         self.line_h = float(theme.get("lineHeight") or 1.72)
         self.gap_pt = float(theme.get("gap") or 20) * PX2PT
-        self.family = theme.get("family") if theme.get("family") in ("single", "headerBar", "sidebar", "twoCol") else "single"
-        self.section_style = theme.get("sectionStyle") if theme.get("sectionStyle") in ("underline", "leftbar", "bar", "plain") else "underline"
+        self.family = theme.get("family") if theme.get("family") in ("single", "headerBar", "sidebar", "bannerLeft", "twoCol") else "single"
+        self.section_style = theme.get("sectionStyle") if theme.get("sectionStyle") in ("underline", "leftbar", "bar", "solid", "rule", "plain") else "underline"
+        self.show_icons = theme.get("showIcons") is not False
+        self.page_bg = _hex_or(theme.get("pageBg"), "FFFFFF")
         # ── 像素级垂直节奏（与网页预览对齐）──
         # 网页 line-height = fontSize × 倍数（px）；Word 用固定行距(exact)按 pt 换算，
         # 避免 Word「多倍行距 ×字体默认行高」造成的 ~30% 放大导致页数不一致
@@ -310,33 +390,61 @@ class _Ctx:
         self.contacts = [(label, _s(basic.get(k))) for k, label in CONTACT_ORDER if _has(basic.get(k))]
         self.extras = [(label, _s(basic.get(k))) for k, label in EXTRA_FIELD_LABEL.items() if _has(basic.get(k))]
         self.photo_bytes = _photo_bytes(basic.get("photo"))
+        # 头像宽度跟随编辑器的「头像大小」滑块（px → cm），限制在合理范围避免撑破版式
+        _ps = float(theme.get("photoSize") or 92)
+        self.photo_cm = max(1.6, min(_ps * 2.54 / 96.0, 4.6))
 
     def item_font(self):
         return self.family_font
 
+    def grid_pairs(self):
+        """bannerLeft 头部两列信息：(标签, 值) 列表。"""
+        out = []
+        for k, label in BL_GRID_ORDER:
+            v = _s(self.basic.get(k))
+            if v:
+                out.append((label, v))
+        return out
+
 
 def _section_title(t: _Target, ctx: _Ctx, label: str, icon: str,
                    width_cm: float, first: bool, on_dark: bool = False) -> None:
-    """模块标题：跟随标题样式（underline/leftbar/bar/plain）；深色栏内固定白字。"""
+    """模块标题：跟随标题样式（underline/leftbar/bar/solid/plain）；深色栏内固定白字。"""
     p = t.para()
     _spacing(p, before=0 if first else ctx.gap_pt, after=ctx.title_after_pt, line=ctx.title_line_pt)
     title_pt = ctx.body_pt + 2
+    if not getattr(ctx, "show_icons", True):
+        icon = ""
     text = f"{icon} {label}" if icon else label
     if on_dark:
         run = p.add_run(text)
         _set_run_font(run, ctx.item_font(), title_pt, ctx.on_dark_text, bold=True)
         _para_border_bottom(p, "FFFFFF", 8)
         return
-    if ctx.section_style == "bar":
-        _para_shading(p, ctx.soft)
+    if ctx.section_style == "solid":
+        # 实心主色横条 + 白字（版心宽度，对齐「横条式」模板）
+        _para_shading(p, ctx.primary)
         pf = p.paragraph_format
-        if ctx.family == "headerBar":
-            # 与横幅对齐：色块左右贴纸张边缘，文字回到版心位（与正文左缘齐平）
-            pf.left_indent = Cm(-ctx.pad_cm)
-            pf.first_line_indent = Cm(ctx.pad_cm)
-            pf.right_indent = Cm(-ctx.pad_cm)
-        else:
-            pf.left_indent = Cm(0.12)
+        pf.left_indent = Cm(0.12)
+        pf.first_line_indent = Cm(0)
+        run = p.add_run(text)
+        _set_run_font(run, ctx.item_font(), title_pt, "FFFFFF", bold=True)
+    elif ctx.section_style == "rule":
+        # 标题文字 + 右侧延伸细线：右对齐制表位（下划线引导符）把线拉满版心
+        run = p.add_run(text)
+        _set_run_font(run, ctx.item_font(), title_pt, ctx.deep, bold=True)
+        pf = p.paragraph_format
+        try:
+            pf.tab_stops.add_tab_stop(Cm(max(width_cm - 0.05, 1.0)),
+                                     WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.LINES)
+        except Exception:  # noqa: BLE001
+            pass
+        tab_run = p.add_run("\t")
+        _set_run_font(tab_run, ctx.item_font(), title_pt, ctx.primary)
+    elif ctx.section_style == "bar":
+        _para_shading(p, ctx.soft)
+        # 顶部横幅已改成「细顶带 + 白底」，标题色块不再需要贴纸边，与其它版式统一
+        p.paragraph_format.left_indent = Cm(0.12)
         run = p.add_run(text)
         _set_run_font(run, ctx.item_font(), title_pt, ctx.deep, bold=True)
     elif ctx.section_style == "leftbar":
@@ -378,29 +486,45 @@ def _head_block(t: _Target, ctx: _Ctx, width_cm: float, with_extras: bool = True
     _para_border_bottom(p, ctx.primary, 12)
 
 
-def _basic_grid(t: _Target, ctx: _Ctx) -> None:
-    """基本信息两列网格（与编辑器 basicGrid 一致）。仅用于 doc 容器。"""
+def _basic_grid(t: _Target, ctx: _Ctx, width_cm: Optional[float] = None,
+                on_dark: bool = False, after_pt: float = 0.0) -> None:
+    """基本信息两列网格（与编辑器 basicGrid 一致）。
+
+    width_cm 为 None 时用整版心宽；传值时用于头部单元格内（有照片时网格并入头部）。
+    on_dark=True 用于顶部横幅等主色底上（白字），与网页 `.rr-banner .rr-basic-row` 对齐。
+    """
     if not ctx.extras:
         return
+    total = width_cm if width_cm else ctx.content_cm
+    dark = bool(on_dark)
+    label_color = ctx.on_dark_muted if dark else ctx.gray
+    value_color = ctx.on_dark_text if dark else ctx.gray
     doc = t.obj
     if not hasattr(doc, "add_table"):
         for label, v in ctx.extras:
             p = t.para()
             _spacing(p, after=0, line=ctx.line_pt)
             run = p.add_run(f"{label}：{v}")
-            _set_run_font(run, ctx.item_font(), ctx.body_pt, ctx.gray)
+            _set_run_font(run, ctx.item_font(), ctx.body_pt, value_color)
         return
     n = len(ctx.extras)
     tbl = doc.add_table(rows=(n + 1) // 2, cols=2)
     tbl.autofit = False
+    # 左右内边距归零：网格文字与姓名/正文严格左对齐；after_pt 用来撑底部留白
+    _tbl_cell_margin(tbl, bottom_pt=after_pt)
     for idx, (label, v) in enumerate(ctx.extras):
         cell = tbl.rows[idx // 2].cells[idx % 2]
-        cell.width = Cm(round(ctx.content_cm / 2, 2))
+        cell.width = Cm(round(total / 2, 2))
         p = cell.paragraphs[0]
         _spacing(p, after=0, line=ctx.line_pt)
-        run = p.add_run(f"{label}：{v}")
-        _set_run_font(run, ctx.item_font(), ctx.body_pt, ctx.gray)
-    gap = doc.add_paragraph()
+        r1 = p.add_run(f"{label}：")
+        _set_run_font(r1, ctx.item_font(), ctx.body_pt, label_color)
+        r2 = p.add_run(v)
+        _set_run_font(r2, ctx.item_font(), ctx.body_pt, value_color)
+    # 表后 Word 必须有一个段落；python-docx 建表时已自动补了一个空段落，
+    # 直接把它压扁复用，避免网格下方多出一整行空白
+    paras = getattr(doc, "paragraphs", None) or []
+    gap = paras[-1] if paras and not paras[-1].text.strip() else doc.add_paragraph()
     gap.paragraph_format.line_spacing = Pt(1)
     gap.paragraph_format.space_before = Pt(0)
     gap.paragraph_format.space_after = Pt(0)
@@ -547,14 +671,37 @@ def _render_sections(t: _Target, ctx: _Ctx, width_cm: float,
         first = False
 
 
+def _set_page_bg(doc: Document, hex_color: str) -> None:
+    """设置纸张底色：document.xml 写 <w:background>，settings.xml 开启显示。
+
+    白色（默认）不写任何东西，保持与旧版导出完全一致。
+    """
+    color = (hex_color or "").upper()
+    if color in ("", "FFFFFF"):
+        return
+    try:
+        bg = OxmlElement("w:background")
+        bg.set(qn("w:color"), color)
+        doc.element.insert(0, bg)   # CT_Document 要求 background 在 body 之前
+        st = doc.settings.element
+        if st.find(qn("w:displayBackgroundShape")) is None:
+            el = OxmlElement("w:displayBackgroundShape")
+            seq = list(getattr(st, "_tag_seq", ()) or ())
+            succ = seq[seq.index("w:displayBackgroundShape") + 1:] if "w:displayBackgroundShape" in seq else []
+            st.insert_element_before(el, *succ)
+    except Exception:  # noqa: BLE001
+        # 底色是装饰能力，失败不影响正文导出
+        pass
+
+
 def _new_doc(ctx: _Ctx) -> Document:
     doc = Document()
     sec = doc.sections[0]
     sec.page_width, sec.page_height = Cm(21.0), Cm(29.7)
     sec.left_margin = sec.right_margin = Cm(ctx.pad_cm)
     sec.top_margin = sec.bottom_margin = Cm(ctx.pad_cm)
-    if ctx.family in ("headerBar", "sidebar"):
-        # 网页中横幅/侧栏以负 margin 顶到纸张边缘（吃掉顶部留白），Word 同样贴顶
+    if ctx.family in ("headerBar", "sidebar", "bannerLeft"):
+        # 网页中横幅/侧栏/角色块以负 margin 顶到纸张边缘（吃掉顶部留白），Word 同样贴顶
         sec.top_margin = Cm(0)
     normal = doc.styles["Normal"]
     normal.font.name = ctx.item_font()
@@ -562,52 +709,85 @@ def _new_doc(ctx: _Ctx) -> Document:
     normal.font.color.rgb = _rgb(ctx.body_color)
     nrpr = normal.element.get_or_add_rPr()
     nrpr.get_or_add_rFonts().set(qn("w:eastAsia"), ctx.item_font())
+    _set_page_bg(doc, ctx.page_bg)
     return doc
 
 
 def _build_single_headerBar(doc: Document, ctx: _Ctx, banner: bool) -> None:
-    """single / headerBar：headerBar 先画主色横幅（姓名/意向/联系方式 + 照片）。"""
+    """single / headerBar。
+
+    headerBar（顶部横幅）= 页顶一条主色通栏细带 + 白底头部，姓名不再压深色块。
+    头部内：姓名 / 意向 / 联系方式 + 基本信息网格（并入以撑高文字区，避免与照片之间留竖条空档），
+    右上照片，头部下缘一条主色细线收口。
+    """
     if banner:
+        pad_pt = ctx.pad_cm / 2.54 * 72
+
+        # ① 页顶主色细带（左右通栏到纸边）
+        bar = doc.add_paragraph()
+        _spacing(bar, before=0, after=0, line=Pt(6))
+        _para_shading(bar, ctx.primary)
+        bar.paragraph_format.left_indent = Cm(-ctx.pad_cm)
+        bar.paragraph_format.right_indent = Cm(-ctx.pad_cm)
+
+        # ② 头部：左文字 / 右照片（表格贴版心，不出血）
+        photo_w = max(3.2, round(ctx.photo_cm + 0.4, 2)) if ctx.photo_bytes else 0.4
+        text_w = round(ctx.content_cm - photo_w, 2)
         tbl = doc.add_table(rows=1, cols=2)
-        # 负缩进 = 版心边距（跟随用户设置），总宽精确铺满 21cm 纸宽，两端贴边无留白
-        _table_bleed(tbl, 21.0, left_margin_cm=ctx.pad_cm, zero_cell_margin=True)
+        _table_bleed(tbl, ctx.content_cm, left_margin_cm=0.0, zero_cell_margin=True)
         left, right = tbl.rows[0].cells
-        right_w = 3.4
-        left.width, right.width = Cm(21.0 - right_w), Cm(right_w)
-        for c in (left, right):
-            _cell_shading(c, ctx.primary)
-        pad_in = round(ctx.pad_cm, 2)   # 横幅文字内缩 = 版心留白，与正文左缘对齐
+        left.width, right.width = Cm(text_w), Cm(photo_w)
+        left.vertical_alignment = WD_ALIGN_VERTICAL.TOP
+        right.vertical_alignment = WD_ALIGN_VERTICAL.TOP
+
         lt = _Target(left)
+        top = lt.para()                  # 顶部留白用空段落（单元格首段设段前距会把行撑到跨页）
+        _spacing(top, before=0, after=0, line=Pt(round(pad_pt * 0.62, 1)))
         p = lt.para()
-        _spacing(p, before=20, after=2)
-        p.paragraph_format.left_indent = Cm(pad_in)
+        _spacing(p, before=0, after=2, line=ctx.name_line_pt)
         run = p.add_run(ctx.name)
-        _set_run_font(run, ctx.item_font(), ctx.name_pt, ctx.on_dark_text, bold=True)
+        _set_run_font(run, ctx.item_font(), ctx.name_pt, ctx.deep, bold=True)
         if ctx.intention:
             p = lt.para()
-            _spacing(p, after=2)
-            p.paragraph_format.left_indent = Cm(pad_in)
-            run = p.add_run(ctx.intention)
-            _set_run_font(run, ctx.item_font(), ctx.body_pt + 1.5, ctx.on_dark_text, bold=True)
+            _spacing(p, after=2, line=ctx.line_pt)
+            run = p.add_run("求职意向：" + ctx.intention)
+            _set_run_font(run, ctx.item_font(), ctx.body_pt + 1.5, ctx.primary, bold=True)
         if ctx.contacts:
             p = lt.para()
-            _spacing(p, after=10)
-            p.paragraph_format.left_indent = Cm(pad_in)
+            _spacing(p, after=0, line=ctx.line_pt)
             p.paragraph_format.right_indent = Cm(0.3)
             run = p.add_run("  |  ".join(f"{label}：{v}" for label, v in ctx.contacts))
-            _set_run_font(run, ctx.item_font(), ctx.body_pt, ctx.on_dark_muted)
+            _set_run_font(run, ctx.item_font(), ctx.body_pt, ctx.gray)
+
+        # 基本信息网格并入头部：文字区与照片同高，右侧不再留下竖条空白
+        if ctx.extras:
+            before = len(left.tables)
+            _basic_grid(lt, ctx, text_w)
+            if len(left.tables) > before:
+                _table_bleed(left.tables[-1], text_w, left_margin_cm=0.0)
+
         if ctx.photo_bytes:
             rt = _Target(right)
             p = rt.para()
-            _spacing(p, before=8, after=8)
+            _spacing(p, before=0, after=0)
             p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-            p.paragraph_format.right_indent = Cm(pad_in)
             run = p.add_run()
             try:
-                run.add_picture(io.BytesIO(ctx.photo_bytes), width=Cm(2.6))
+                run.add_picture(io.BytesIO(ctx.photo_bytes), width=Cm(round(photo_w - 0.2, 2)))
             except Exception:  # noqa: BLE001
                 pass
-    gap = doc.add_paragraph()  # 横幅与正文的间隔（1pt 高）
+
+        # ③ 头部下缘主色细线（对应网页 .rr-hb-top 的 border-bottom）
+        line = doc.add_paragraph()
+        _spacing(line, before=6, after=0, line=Pt(1))
+        _para_border_bottom(line, ctx.primary, 12)
+        sep = doc.add_paragraph()        # 隔开，避免与下一段的下边框被 Word 合并成一条
+        _spacing(sep, before=0, after=ctx.gap_pt, line=Pt(1))
+
+        _render_sections(_Target(doc), ctx, ctx.content_cm)
+        return
+
+    gap = doc.add_paragraph()  # 无横幅时的头部间隔（1pt 高）
     gap.paragraph_format.line_spacing = Pt(1)
     gap.paragraph_format.space_before = Pt(0)
     gap.paragraph_format.space_after = Pt(0)
@@ -627,7 +807,7 @@ def _build_sidebar(doc: Document, ctx: _Ctx) -> None:
     side_w, main_w = 5.0, 13.2
 
     side = _Target(left)
-    _photo_paragraph(side, ctx, 3.2, center=True)
+    _photo_paragraph(side, ctx, min(ctx.photo_cm, 4.0), center=True)
     for p0 in left.paragraphs:
         p0.paragraph_format.left_indent = Cm(0.35)
         p0.paragraph_format.right_indent = Cm(0.15)
@@ -733,12 +913,101 @@ def _build_two_col(doc: Document, ctx: _Ctx) -> None:
     _render_sections(t, ctx, round((ctx.content_cm - col_gap) / 2, 2))
 
 
+def _build_banner_left(doc: Document, ctx: _Ctx) -> None:
+    """bannerLeft（左色条）：左侧主色竖条 + 大号姓名（不加底色）+ 右侧两列信息 + 右上照片 + 细线。
+
+    与网页一致：竖条贴纸左缘出血，右侧收在版心（照片不贴纸边）；
+    姓名/意向在上、两列信息在下，中间用空段落撑开，避免与照片之间出现整块空白。
+    """
+    photo_w = max(2.2, round(ctx.photo_cm + 0.1, 2))
+    bar_w = 0.32
+    total_w = round(21.0 - ctx.pad_cm, 2)
+    main_w = round(total_w - bar_w - photo_w, 2)
+    ml_ind = max(round(ctx.pad_cm - bar_w, 2), 0.2)   # 竖条已占 0.32cm，姓名左缘对齐正文
+
+    tbl = doc.add_table(rows=1, cols=3)
+    _table_bleed(tbl, total_w, left_margin_cm=ctx.pad_cm, zero_cell_margin=True)
+    c_bar, c_main, c_photo = tbl.rows[0].cells
+    c_bar.width, c_main.width, c_photo.width = Cm(bar_w), Cm(main_w), Cm(photo_w)
+    _cell_shading(c_bar, ctx.primary)
+    c_main.vertical_alignment = WD_ALIGN_VERTICAL.TOP
+    c_photo.vertical_alignment = WD_ALIGN_VERTICAL.TOP
+
+    # 姓名 + 求职意向：深色字，不加底色（老大明确否掉了"名字底下压色块"的做法）
+    pad_pt = ctx.pad_cm / 2.54 * 72
+    mt = _Target(c_main)
+    sp_top = mt.para()                       # 复用单元格自带空段落做顶部留白
+    _spacing(sp_top, before=0, after=0, line=Pt(round(pad_pt * 0.52, 1)))
+    p = mt.para()
+    _spacing(p, before=0, after=2, line=ctx.name_line_pt)
+    p.paragraph_format.left_indent = Cm(ml_ind)
+    p.paragraph_format.right_indent = Cm(0.3)
+    run = p.add_run(ctx.name)
+    _set_run_font(run, ctx.item_font(), ctx.name_pt, ctx.body_color, bold=True)
+    if ctx.intention:
+        p = mt.para()
+        _spacing(p, after=9, line=ctx.line_pt)
+        p.paragraph_format.left_indent = Cm(ml_ind)
+        p.paragraph_format.right_indent = Cm(0.3)
+        run = p.add_run(ctx.intention)
+        _set_run_font(run, ctx.item_font(), ctx.body_pt, ctx.gray)
+
+    # 两列信息网格（嵌套表格），字号/行距对齐网页的 0.9em / 1.35
+    pairs = ctx.grid_pairs()
+    if pairs:
+        n_rows = (len(pairs) + 1) // 2
+        sub = c_main.add_table(rows=n_rows, cols=2)
+        sub.autofit = False
+        _tbl_cell_margin(sub, bottom_pt=round(pad_pt * 0.3, 1))
+        for idx, (label, v) in enumerate(pairs):
+            cell = sub.rows[idx // 2].cells[idx % 2]
+            cell.width = Cm(round(main_w / 2 - 0.15, 2))
+            cp = cell.paragraphs[0]
+            _spacing(cp, after=0, line=Pt(ctx.body_pt * 1.35))
+            cp.paragraph_format.left_indent = Cm(ml_ind)
+            r1 = cp.add_run("◆ ")
+            _set_run_font(r1, ctx.item_font(), ctx.body_pt - 1.6, ctx.primary)
+            r2 = cp.add_run(f"{label}：")
+            _set_run_font(r2, ctx.item_font(), ctx.body_pt - 1.0, ctx.body_color, bold=True)
+            r3 = cp.add_run(v)
+            _set_run_font(r3, ctx.item_font(), ctx.body_pt - 1.0, ctx.body_color)
+        # 信息区下方留白：表后 Word 必补一个空段落，正好拿来做固定高度的空白
+        tail = c_main.paragraphs[-1]
+        if tail is not sp_top and not tail.text.strip():
+            _spacing(tail, before=0, after=0, line=Pt(round(pad_pt * 0.3, 1)))
+
+    # 右上照片：贴版心右缘、无边框
+    if ctx.photo_bytes:
+        pt = _Target(c_photo)
+        p = pt.para()
+        _spacing(p, before=0, after=0)
+        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        run = p.add_run()
+        try:
+            run.add_picture(io.BytesIO(ctx.photo_bytes), width=Cm(photo_w))
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        _spacing(_Target(c_photo).para(), before=0, after=0)
+
+    # 细线：左侧通栏到纸边，右侧收在版心（与网页 .rr-bl-hair 一致）
+    p = doc.add_paragraph()
+    _spacing(p, before=5, after=0, line=Pt(1))
+    p.paragraph_format.left_indent = Cm(-ctx.pad_cm)
+    _para_border_bottom(p, ctx.primary, 12)
+
+    t = _Target(doc)
+    _render_sections(t, ctx, ctx.content_cm)
+
+
 def generate_docx(resume: dict, theme: dict) -> bytes:
     """统一 JSON 模型 → docx 字节（跟随版式族与标题样式）。"""
     ctx = _Ctx(resume or {}, theme or {})
     doc = _new_doc(ctx)
     if ctx.family == "headerBar":
         _build_single_headerBar(doc, ctx, banner=True)
+    elif ctx.family == "bannerLeft":
+        _build_banner_left(doc, ctx)
     elif ctx.family == "sidebar":
         _build_sidebar(doc, ctx)
     elif ctx.family == "twoCol":
@@ -749,7 +1018,11 @@ def generate_docx(resume: dict, theme: dict) -> bytes:
             tbl = doc.add_table(rows=1, cols=2)
             tbl.autofit = False
             left, right = tbl.rows[0].cells
-            left.width, right.width = Cm(ctx.content_cm - 3.0), Cm(3.0)
+            _rw = max(2.8, round(ctx.photo_cm + 0.5, 2))
+            left.width, right.width = Cm(round(ctx.content_cm - _rw, 2)), Cm(_rw)
+            # 文字块与照片垂直居中对齐，避免照片把行高撑高后文字下方留出空档
+            left.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            right.vertical_alignment = WD_ALIGN_VERTICAL.TOP
             ht = _Target(left)
             p = ht.para()
             _spacing(p, after=4.5, line=ctx.name_line_pt)
@@ -765,27 +1038,27 @@ def generate_docx(resume: dict, theme: dict) -> bytes:
                 _spacing(p, after=0, line=ctx.line_pt)
                 run = p.add_run("  |  ".join(f"{label}：{v}" for label, v in ctx.contacts))
                 _set_run_font(run, ctx.item_font(), ctx.body_pt, ctx.gray)
-            if ctx.extras:
-                p = ht.para()
-                _spacing(p, after=0, line=ctx.line_pt)
-                run = p.add_run("  |  ".join(f"{label}：{v}" for label, v in ctx.extras))
-                _set_run_font(run, ctx.item_font(), ctx.body_pt, ctx.gray)
+            # 扩展字段以两列网格并入头部单元格（与网页一致：网格在头部内，撑高文字区与照片匹配）
+            _basic_grid(ht, ctx, round(ctx.content_cm - _rw, 2))
             rt = _Target(right)
             p = rt.para()
             _spacing(p, after=0)
             p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
             run = p.add_run()
             try:
-                run.add_picture(io.BytesIO(ctx.photo_bytes), width=Cm(2.4))
+                run.add_picture(io.BytesIO(ctx.photo_bytes), width=Cm(ctx.photo_cm))
             except Exception:  # noqa: BLE001
                 pass
             p = t.para()
-            _spacing(p, after=4)
+            _spacing(p, before=0, after=0, line=Pt(1))   # 1pt 高，只用来画横线
             _para_border_bottom(p, ctx.primary, 12)
-            _basic_grid(t, ctx)
+            # 紧接着插一个无边框空段落：否则 Word 会把「头部下线」与
+            # 首个小标题的下划线识别为同一边框块合并，只画最后一条
+            sp = t.para()
+            _spacing(sp, before=0, after=4, line=Pt(1))
             _render_sections(t, ctx, ctx.content_cm)
         else:
-            _head_block(t, ctx, ctx.content_cm)
+            _head_block(t, ctx, ctx.content_cm, with_extras=False)
             _basic_grid(t, ctx)
             _render_sections(t, ctx, ctx.content_cm)
     buf = io.BytesIO()

@@ -30,7 +30,7 @@
   min-height: 1123px;
   box-sizing: border-box;
   padding: var(--rr-pad);
-  background: #fff;
+  background: var(--rr-page-bg, #fff);
   color: var(--rr-text);
   font-family: var(--rr-font);
   font-size: var(--rr-fs);
@@ -68,10 +68,36 @@
   border-radius: 4px;
   background: var(--rr-accent-soft);
 }
+/* 实心色条：主色铺满、白字（对齐「横条式」模板设计） */
+.rr-sec-title.is-solid {
+  border-bottom: none;
+  border-radius: 0;
+  background: var(--rr-accent);
+  color: #fff;
+  padding: 5px 12px;
+  letter-spacing: 1px;
+  margin-bottom: 12px;
+}
+.rr-sec-title.is-solid .rr-sec-ico { opacity: .95; }
 .rr-sec-title.is-leftbar {
   border-bottom: none;
   padding-left: 10px;
   border-left: 3px solid var(--rr-accent);
+}
+/* 标题 + 右侧延伸细线：文字后拉一条主色横线到版心右缘（简约风模板） */
+.rr-sec-title.is-rule {
+  border-bottom: none;
+  padding-bottom: 0;
+  margin-bottom: 12px;
+  gap: 10px;
+}
+.rr-sec-title.is-rule::after {
+  content: '';
+  flex: 1 1 auto;
+  height: 2px;
+  background: var(--rr-accent);
+  border-radius: 1px;
+  opacity: .9;
 }
 
 /* ── 条目 ── */
@@ -107,13 +133,20 @@
 /* ── 头部（单栏 / 双栏族）── */
 .rr-head {
   display: flex;
-  align-items: flex-start;
+  align-items: stretch;          /* 文字块撑满头部高度，与照片上下齐平 */
   justify-content: space-between;
   gap: 18px;
-  padding-bottom: 14px;
+  padding-bottom: 12px;
   border-bottom: 2px solid var(--rr-accent);
 }
 .rr-head-main { min-width: 0; flex: 1 1 auto; }
+.rr-head > .rr-head-main {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;   /* 姓名顶部、联系方式贴底，中间不留空档 */
+  gap: 6px;
+}
+.rr-head > .rr-head-main > .rr-contact:last-child { margin-bottom: 0; }
 .rr-name {
   font-size: var(--rr-name-size);
   font-weight: 700;
@@ -207,30 +240,97 @@
 .rr-side .rr-item-sub { opacity: .78; }
 .rr-side .rr-tag { background: rgba(255, 255, 255, .16); color: #fff; }
 
-/* ── 族三：顶部横幅 ── */
-/* 横幅版式下，色块标题与横幅一样左右全幅贴边 */
-.fam-headerBar .rr-sec-title.is-bar {
-  margin-left: calc(var(--rr-pad) * -1);
-  margin-right: calc(var(--rr-pad) * -1);
-  padding-left: var(--rr-pad);
-  padding-right: var(--rr-pad);
-}
-.rr-banner {
-  margin: calc(var(--rr-pad) * -1);
-  margin-bottom: var(--rr-gap);
-  padding: calc(var(--rr-pad) * 0.62) var(--rr-pad);
+/* ── 族三：顶部横幅（细顶带版）──
+   姓名不再压深色块：页顶一条主色通栏色带做标识，下面是白底头部 + 底部主色细线 */
+.rr-page.fam-headerBar { padding-top: 0; }
+.fam-headerBar .rr-hb-bar {
+  height: 8px;
   background: var(--rr-accent);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
+  margin: 0 calc(var(--rr-pad) * -1);   /* 左右出血到纸边 */
 }
-.rr-banner .rr-name { color: #fff; }
-.rr-banner .rr-intent { color: rgba(255,255,255,.9); }
-.rr-banner .rr-contact { color: rgba(255,255,255,.86); margin-top: 10px; }
-.rr-banner .rr-photo { border-color: rgba(255,255,255,.5); background: rgba(255,255,255,.15); }
-.rr-banner .rr-photo .rr-photo-ph { color: rgba(255,255,255,.6); }
+.fam-headerBar .rr-hb-top {
+  padding: calc(var(--rr-pad) * 0.62) 0 calc(var(--rr-pad) * 0.3);
+  border-bottom: 2px solid var(--rr-accent);
+  margin-bottom: var(--rr-gap);
+}
+.fam-headerBar .rr-hb-top .rr-head { border-bottom: none; padding-bottom: 0; }
+.fam-headerBar .rr-hb-top .rr-name { color: var(--rr-accent-deep); }
+.fam-headerBar .rr-hb-top .rr-contact { margin-top: 4px; }
+.fam-headerBar .rr-hb-top .rr-basic-grid { margin-top: 10px; }
+
+/* ── 族五：左色条（姓名不加底色，左侧主色竖条做装饰）── */
+.rr-page.fam-bannerLeft { padding-top: 0; }
+.fam-bannerLeft .rr-bl-head {
+  display: flex;
+  align-items: stretch;
+  gap: 0;                                   /* 竖条与正文的间距由 .rr-bl-main 的左内边距统一控制 */
+  margin: 0 0 0 calc(var(--rr-pad) * -1);   /* 竖条贴纸边出血，正文右缘收在版心 */
+}
+.fam-bannerLeft .rr-bl-bar {
+  flex: 0 0 10px;
+  background: var(--rr-accent);
+}
+.fam-bannerLeft .rr-bl-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;   /* 姓名贴顶、信息贴底，中间不留整块空档 */
+  gap: 10px;
+  padding: calc(var(--rr-pad) * 0.5) 0 calc(var(--rr-pad) * 0.26)
+           clamp(8px, calc(var(--rr-pad) - 10px), 60px);   /* 竖条 10px 已占位，姓名左缘对齐正文 */
+}
+.fam-bannerLeft .rr-bl-main .rr-name {
+  color: var(--rr-text);
+  font-size: var(--rr-name-size);
+  line-height: 1.15;
+  font-weight: 700;
+  letter-spacing: .5px;
+  margin: 0;
+}
+.fam-bannerLeft .rr-bl-main .rr-intent {
+  color: var(--rr-muted);
+  font-size: calc(var(--rr-fs) * 0.98);
+  margin-top: 5px;
+  padding: 0;
+}
+.fam-bannerLeft .rr-bl-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 14px;
+  font-size: calc(var(--rr-fs) * 0.9);
+  line-height: 1.35;
+}
+.fam-bannerLeft .rr-bl-cell {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--rr-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fam-bannerLeft .rr-bl-cell b { font-weight: 600; color: var(--rr-text); }
+.fam-bannerLeft .rr-bl-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  background: var(--rr-accent);
+  border-radius: 1px;
+  transform: translateY(-1px) rotate(45deg);
+}
+.fam-bannerLeft .rr-bl-head .rr-photo {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  border: none;
+  border-radius: 0;
+  background: var(--rr-soft);
+}
+.fam-bannerLeft .rr-bl-hair {
+  height: 2px;
+  background: var(--rr-accent);
+  margin: calc(var(--rr-pad) * 0.3) 0 0 calc(var(--rr-pad) * -1);   /* 左边通栏，右侧收在版心 */
+}
 
 /* ── 族四：双栏 ── */
 .rr-cols { column-count: 2; column-gap: 26px; }
@@ -253,7 +353,8 @@
   gap: 3px 22px;
 }
 .rr-basic-grid.is-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.rr-page > .rr-basic-grid { margin-top: var(--rr-gap); }
+.rr-page > .rr-basic-grid { margin-top: 8px; }   /* 头部分隔线已提供视觉间距，不再叠加整段间距 */
+.rr-head-main > .rr-basic-grid { margin-top: 10px; }   /* 网格并入头部时（有照片）与联系方式留一点间隙 */
 .rr-basic-row { color: var(--rr-text); font-size: calc(var(--rr-fs) * 0.98); }
 .rr-basic-row b { color: var(--rr-muted); font-weight: 400; }
 
